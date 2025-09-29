@@ -1,0 +1,292 @@
+// Replace the entire contents of your Main.java file with this.
+
+package io.github.jayhost;
+
+import com.badlogic.gdx.ApplicationAdapter;
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.assets.loaders.resolvers.InternalFileHandleResolver;
+import com.badlogic.gdx.graphics.*;
+import com.badlogic.gdx.graphics.g3d.Attribute;
+import com.badlogic.gdx.graphics.g3d.Material;
+import com.badlogic.gdx.graphics.g3d.Model;
+import com.badlogic.gdx.graphics.g3d.ModelInstance;
+import com.badlogic.gdx.graphics.g3d.Renderable;
+import com.badlogic.gdx.graphics.g3d.attributes.TextureAttribute;
+import com.badlogic.gdx.graphics.g3d.utils.DefaultTextureBinder;
+import com.badlogic.gdx.graphics.g3d.utils.ModelBuilder;
+import com.badlogic.gdx.graphics.g3d.utils.RenderContext;
+import com.badlogic.gdx.graphics.glutils.FrameBuffer;
+import com.badlogic.gdx.graphics.glutils.GLFrameBuffer;
+import com.badlogic.gdx.graphics.glutils.ShaderProgram;
+import com.badlogic.gdx.math.MathUtils;
+import com.badlogic.gdx.math.Matrix3;
+import com.badlogic.gdx.math.Matrix4;
+import com.badlogic.gdx.utils.Array;
+import com.badlogic.gdx.utils.GdxRuntimeException;
+import com.badlogic.gdx.utils.Pool;
+import net.mgsx.gltf.loaders.gltf.GLTFLoader;
+import net.mgsx.gltf.scene3d.attributes.PBRTextureAttribute;
+import net.mgsx.gltf.scene3d.scene.Scene;
+import net.mgsx.gltf.scene3d.scene.SceneAsset;
+import net.mgsx.gltf.scene3d.utils.EnvironmentUtil;
+
+import java.util.HashMap;
+
+public class Main extends ApplicationAdapter {
+
+    private PerspectiveCamera camera;
+    private RenderContext renderContext;
+    private FPSController fps;
+    private float time;
+
+    private FrameBuffer gbuffer;
+    private ShaderProgram gbufferShader;
+    private final RenderablePool renderablesPool = new RenderablePool();
+    private final Array<Renderable> renderables = new Array<>();
+    private final Matrix3 normalMatrix = new Matrix3();
+
+    private ShaderProgram lightingShader;
+    private Mesh fullScreenQuad;
+
+    private Cubemap diffuseCubemap;
+    private Cubemap specularCubemap;
+    private Texture brdfLUT;
+
+    // --- RE-INTRODUCED: We are back to using a 3D model for the skybox ---
+    private ShaderProgram skyboxShader;
+    private Model skyboxModel;
+    private ModelInstance skyboxInstance;
+    private final Matrix4 skyboxTransform = new Matrix4();
+    private final Matrix4 viewRotationMatrix = new Matrix4(); // ADDED: To safely calculate the skybox matrix
+
+    private ReplSession interpreter;
+    private final HashMap<String, ModelInstance> loadedInstances = new HashMap<>();
+    private GLTFLoader gltfLoader;
+
+    @Override
+    public void create() {
+        gltfLoader = new GLTFLoader();
+
+        ShaderProgram.pedantic = false;
+        renderContext = new RenderContext(new DefaultTextureBinder(DefaultTextureBinder.ROUNDROBIN, 1));
+        gbufferShader = new ShaderProgram(
+            Gdx.files.internal("shaders/gbuffer.vert"),
+            Gdx.files.internal("shaders/gbuffer.frag")
+        );
+        if (!gbufferShader.isCompiled()) {
+            throw new GdxRuntimeException("G-buffer shader failed to compile: " + gbufferShader.getLog());
+        }
+
+        lightingShader = new ShaderProgram(
+            Gdx.files.internal("shaders/lighting.vert"),
+            Gdx.files.internal("shaders/lighting.frag")
+        );
+        if (!lightingShader.isCompiled()) {
+            throw new GdxRuntimeException("Lighting shader failed to compile: " + lightingShader.getLog());
+        }
+
+        skyboxShader = new ShaderProgram(
+            Gdx.files.internal("shaders/skybox.vert"),
+            Gdx.files.internal("shaders/skybox.frag")
+        );
+        if (!skyboxShader.isCompiled()) {
+            throw new GdxRuntimeException("Skybox shader failed to compile: " + skyboxShader.getLog());
+        }
+
+        fullScreenQuad = createFullScreenQuad();
+
+        camera = new PerspectiveCamera(90f, Gdx.graphics.getWidth(), Gdx.graphics.getHeight());
+        camera.near = 0.1f;
+        camera.far = 100f;
+        camera.lookAt(0f, 0f, 0f);
+        camera.update();
+
+        fps = new FPSController(camera);
+        Gdx.input.setInputProcessor(fps);
+
+        diffuseCubemap = EnvironmentUtil.createCubemap(new InternalFileHandleResolver(),
+            "mytex/diffuse/diffuse_", ".png", EnvironmentUtil.FACE_NAMES_NEG_POS);
+        specularCubemap = EnvironmentUtil.createCubemap(new InternalFileHandleResolver(),
+            "mytex/specular/specular_", "_", ".png", 10, EnvironmentUtil.FACE_NAMES_NEG_POS);
+        brdfLUT = new Texture(Gdx.files.internal("textures/brdfLUT.png"));
+
+        // --- RE-INTRODUCED: Creating the 3D cube model for the skybox ---
+        ModelBuilder modelBuilder = new ModelBuilder();
+        skyboxModel = modelBuilder.createBox(1f, 1f, 1f, new Material(),
+            VertexAttributes.Usage.Position);
+        skyboxInstance = new ModelInstance(skyboxModel);
+
+        createGBuffer();
+
+        interpreter = new ReplSession();
+        // ... (interpreter setup is the same)
+        try {
+            interpreter.eval("(def (add-at path x y z) (java-call \"io.github.jayhost.LispBridge\" \"addEntityAt\" path x y z))");
+            interpreter.eval("(def (add path) (add-at path 0 0 0))");
+            interpreter.eval("(def (rem path) (java-call \"io.github.jayhost.LispBridge\" \"removeEntity\" path))");
+            interpreter.eval("(def (drain-spawns) (java-call \"io.github.jayhost.LispBridge\" \"drainSpawns\"))");
+            interpreter.eval("(def (drain-removals) (java-call \"io.github.jayhost.LispBridge\" \"drainRemovals\"))");
+
+            interpreter.eval("(defvar helm \"models/helm/DamagedHelmet.gltf\")");
+            interpreter.eval("(defvar mug \"models/mug/mug.gltf\")");
+            interpreter.eval("(defvar ball \"models/ball/ball.gltf\")");
+            interpreter.eval("(defvar barrel \"models/barrel/Barrel.gltf\")");
+            interpreter.eval("(defvar mosin \"models/mosin/M91.gltf\")");
+            interpreter.eval("(defvar bird \"models/god/bird.gltf\")");
+            interpreter.eval("(defvar sponza \"models/sponza/Sponza.gltf\")");
+        
+            interpreter.eval("(add sponza)");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        new Thread(() -> {
+            try {
+                ReplSession.main(new String[]{});
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }, "Lisp-REPL").start();
+    }
+
+    @Override
+    public void render() {
+        float dt = Gdx.graphics.getDeltaTime();
+        time += dt;
+
+        handleLispInteractions();
+        updateCamera(dt);
+
+        // --- Geometry and Lighting Passes are unchanged ---
+        renderContext.begin();
+        gbuffer.begin();
+        Gdx.gl.glClearColor(0, 0, 0, 0);
+        Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT | GL20.GL_DEPTH_BUFFER_BIT);
+        Gdx.gl.glEnable(GL20.GL_DEPTH_TEST);
+//        Gdx.gl.glEnable(GL20.GL_CULL_FACE);
+        gbufferShader.bind();
+        gbufferShader.setUniformMatrix("u_projViewTrans", camera.combined);
+        renderables.clear();
+        renderablesPool.flush();
+        for (ModelInstance instance : loadedInstances.values()) {
+            instance.getRenderables(renderables, renderablesPool);
+        }
+        for(Renderable renderable : renderables) {
+            gbufferShader.setUniformMatrix("u_worldTrans", renderable.worldTransform);
+            gbufferShader.setUniformMatrix("u_normalMatrix", normalMatrix.set(renderable.worldTransform).inv().transpose());
+            bindPBRTextures(gbufferShader, renderable.material);
+            renderable.meshPart.render(gbufferShader);
+        }
+        gbuffer.end();
+        Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT | GL20.GL_DEPTH_BUFFER_BIT);
+        lightingShader.bind();
+        lightingShader.setUniformi("u_albedoMetallic", renderContext.textureBinder.bind(gbuffer.getTextureAttachments().get(0)));
+        lightingShader.setUniformi("u_normalRoughness", renderContext.textureBinder.bind(gbuffer.getTextureAttachments().get(1)));
+        lightingShader.setUniformi("u_aoEmissive", renderContext.textureBinder.bind(gbuffer.getTextureAttachments().get(2)));
+        lightingShader.setUniformi("u_depth", renderContext.textureBinder.bind(gbuffer.getTextureAttachments().get(3)));
+        lightingShader.setUniformi("u_diffuseEnv", renderContext.textureBinder.bind(diffuseCubemap));
+        lightingShader.setUniformi("u_specularEnv", renderContext.textureBinder.bind(specularCubemap));
+        lightingShader.setUniformi("u_brdfLUT", renderContext.textureBinder.bind(brdfLUT));
+        lightingShader.setUniformf("u_cameraPos", camera.position);
+        lightingShader.setUniformMatrix("u_invProjView", camera.invProjectionView);
+        fullScreenQuad.render(lightingShader, GL20.GL_TRIANGLE_FAN);
+
+        // =================================================================
+        // --- SKYBOX PASS (CORRECTED 3D CUBE METHOD) ---
+        // =================================================================
+        Gdx.gl.glDepthFunc(GL20.GL_LEQUAL);
+        Gdx.gl.glDisable(GL20.GL_CULL_FACE);
+
+
+//        skyboxShader.bind();
+//
+//        // This matrix calculation is correct from the last fix
+//        viewRotationMatrix.set(camera.view);
+//        viewRotationMatrix.setTranslation(0, 0, 0);
+//        skyboxTransform.set(camera.projection).mul(viewRotationMatrix);
+//
+//        skyboxShader.setUniformMatrix("u_projViewTrans", skyboxTransform);
+//        skyboxShader.setUniformi("u_environmentMap", renderContext.textureBinder.bind(diffuseCubemap));
+
+        // THIS IS THE CORRECTED PART:
+        // We get the renderable from the instance and render its mesh part.
+//        renderables.clear(); come back
+//        renderablesPool.flush();
+//        skyboxInstance.getRenderables(renderables, renderablesPool);
+//        renderables.get(0).meshPart.render(skyboxShader);
+
+
+        renderContext.end();
+    }
+
+    @Override
+    public void dispose() {
+        gbuffer.dispose();
+        gbufferShader.dispose();
+        lightingShader.dispose();
+        fullScreenQuad.dispose();
+        diffuseCubemap.dispose();
+        specularCubemap.dispose();
+        brdfLUT.dispose();
+        skyboxModel.dispose(); // RE-INTRODUCED
+        skyboxShader.dispose();
+        gltfLoader = null;
+    }
+
+    // All other methods (handleLispInteractions, updateCamera, etc.) are unchanged and correct.
+    private void handleLispInteractions() {
+        Object spawnRaw = null;
+        Object removeRaw = null;
+        try {
+            spawnRaw = interpreter.eval("(drain-spawns)");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        if (spawnRaw instanceof java.util.List) {
+            for (Object o : (java.util.List<?>) spawnRaw) {
+                SpawnRequest req = (SpawnRequest) o;
+                if (!loadedInstances.containsKey(req.path)) {
+                    SceneAsset a = gltfLoader.load(Gdx.files.internal(req.path));
+                    Scene s = new Scene(a.scene);
+                    for (Material material : s.modelInstance.materials) {
+                        for (Attribute attribute : material) {
+                            if (attribute instanceof TextureAttribute) {
+                                TextureAttribute textureAttribute = (TextureAttribute) attribute;
+                                if (textureAttribute.textureDescription != null && textureAttribute.textureDescription.texture != null) {
+                                    textureAttribute.textureDescription.texture.setWrap(Texture.TextureWrap.Repeat, Texture.TextureWrap.Repeat);
+                                    textureAttribute.textureDescription.texture.setFilter(Texture.TextureFilter.MipMapLinearLinear, Texture.TextureFilter.Linear);
+                                }
+                            }
+                        }
+                    }
+                    s.modelInstance.transform.setToTranslation(req.position);
+                    loadedInstances.put(req.path, s.modelInstance);
+                }
+            }
+        }
+        try {
+            removeRaw = interpreter.eval("(drain-removals)");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+       
+        if (removeRaw instanceof java.util.List) {
+            for (Object o : (java.util.List<?>) removeRaw) {
+                String path = (String) o;
+                loadedInstances.remove(path);
+            }
+        }
+    }
+    private void createGBuffer() { if (gbuffer != null) gbuffer.dispose(); GLFrameBuffer.FrameBufferBuilder builder = new GLFrameBuffer.FrameBufferBuilder(Gdx.graphics.getWidth(), Gdx.graphics.getHeight()); builder.addColorTextureAttachment(GL30.GL_RGBA8, GL30.GL_RGBA, GL30.GL_UNSIGNED_BYTE); builder.addColorTextureAttachment(GL30.GL_RGBA8, GL30.GL_RGBA, GL30.GL_UNSIGNED_BYTE); builder.addColorTextureAttachment(GL30.GL_RGBA8, GL30.GL_RGBA, GL30.GL_UNSIGNED_BYTE); builder.addDepthTextureAttachment(GL30.GL_DEPTH_COMPONENT24, GL30.GL_UNSIGNED_INT); gbuffer = builder.build(); }
+    private void bindPBRTextures(ShaderProgram shader, Material material) { PBRTextureAttribute baseColorTex = material.get(PBRTextureAttribute.class, PBRTextureAttribute.BaseColorTexture); if(baseColorTex != null) { shader.setUniformi("u_albedoTexture", renderContext.textureBinder.bind(baseColorTex.textureDescription.texture)); shader.setUniformf("u_hasAlbedoTexture", 1f); } else { shader.setUniformf("u_hasAlbedoTexture", 0f); } TextureAttribute normalTex = material.get(TextureAttribute.class, TextureAttribute.Normal); if(normalTex != null) { shader.setUniformi("u_normalTexture", renderContext.textureBinder.bind(normalTex.textureDescription.texture)); shader.setUniformf("u_hasNormalTexture", 1f); } else { shader.setUniformf("u_hasNormalTexture", 0f); } PBRTextureAttribute metallicRoughnessTex = material.get(PBRTextureAttribute.class, PBRTextureAttribute.MetallicRoughnessTexture); if(metallicRoughnessTex != null) { shader.setUniformi("u_metallicRoughnessTexture", renderContext.textureBinder.bind(metallicRoughnessTex.textureDescription.texture)); shader.setUniformf("u_hasMetallicRoughnessTexture", 1f); } else { shader.setUniformf("u_hasMetallicRoughnessTexture", 0f); } PBRTextureAttribute occlusionTex = material.get(PBRTextureAttribute.class, PBRTextureAttribute.OcclusionTexture); if(occlusionTex != null) { shader.setUniformi("u_occlusionTexture", renderContext.textureBinder.bind(occlusionTex.textureDescription.texture)); shader.setUniformf("u_hasOcclusionTexture", 1f); } else { shader.setUniformf("u_hasOcclusionTexture", 0f); } }
+    private void updateCamera(float dt) {
+        float radius = 1f;
+        float angle = time * 0.1f;
+        float x = MathUtils.cos(angle) * radius;
+        float z = MathUtils.sin(angle) * radius;
+        camera.position.set(x, 1f, z);
+        camera.lookAt(0f, 1f, 0f);
+        camera.update(); }
+    @Override public void resize(int width, int height) { camera.viewportWidth = width; camera.viewportHeight = height; camera.update(); createGBuffer(); }
+    public static Mesh createFullScreenQuad() { float[] verts = new float[]{-1, -1, 0, 0, 0, 1, -1, 0, 1, 0, 1, 1, 0, 1, 1, -1, 1, 0, 0, 1}; Mesh mesh = new Mesh(true, 4, 0, new VertexAttribute(VertexAttributes.Usage.Position, 3, ShaderProgram.POSITION_ATTRIBUTE), new VertexAttribute(VertexAttributes.Usage.TextureCoordinates, 2, ShaderProgram.TEXCOORD_ATTRIBUTE + "0")); mesh.setVertices(verts); return mesh; }
+    public static class RenderablePool extends Pool<Renderable> { protected Array<Renderable> obtained = new Array<>(); @Override protected Renderable newObject() { return new Renderable(); } @Override public Renderable obtain() { Renderable renderable = super.obtain(); renderable.environment = null; renderable.material = null; renderable.meshPart.set("", null, 0, 0, 0); renderable.shader = null; obtained.add(renderable); return renderable; } public void flush() { super.freeAll(obtained); obtained.clear(); } }
+}

@@ -1,0 +1,2303 @@
+package io.github.jayhost.lwjgl3;
+
+import com.badlogic.gdx.backends.lwjgl3.Lwjgl3Application;
+import com.badlogic.gdx.backends.lwjgl3.Lwjgl3ApplicationConfiguration;
+import io.github.jayhost.Main;
+
+/** Launches the desktop (LWJGL3) application. */
+public class Lwjgl3Launcher {
+    public static void main(String[] args) {
+        if (StartupHelper.startNewJvmIfRequired()) return; // This handles macOS support and helps on Windows.
+        createApplication();
+    }
+
+    private static Lwjgl3Application createApplication() {
+        return new Lwjgl3Application(new Main(), getDefaultConfiguration());
+    }
+
+    private static Lwjgl3ApplicationConfiguration getDefaultConfiguration() {
+        Lwjgl3ApplicationConfiguration configuration = new Lwjgl3ApplicationConfiguration();
+        configuration.setTitle("GdxMain2");
+
+
+
+
+        //// Vsync limits the frames per second to what your hardware can display, and helps eliminate
+        //// screen tearing. This setting doesn't always work on Linux, so the line after is a safeguard.
+        configuration.useVsync(true);
+        //// Limits FPS to the refresh rate of the currently active monitor, plus 1 to try to match fractional
+        //// refresh rates. The Vsync setting above should limit the actual FPS to match the monitor.
+        configuration.setForegroundFPS(Lwjgl3ApplicationConfiguration.getDisplayMode().refreshRate + 1);
+        //// If you remove the above line and set Vsync to false, you can get unlimited FPS, which can be
+        //// useful for testing performance, but can also be very stressful to some hardware.
+        //// You may also need to configure GPU drivers to fully disable Vsync; this can cause screen tearing.
+
+        configuration.setWindowedMode(1200, 720);
+        //// You can change these files; they are in lwjgl3/src/main/resources/ .
+        //// They can also be loaded from the root of assets/ .
+        configuration.setWindowIcon("libgdx128.png", "libgdx64.png", "libgdx32.png", "libgdx16.png");
+
+        configuration.setOpenGLEmulation(Lwjgl3ApplicationConfiguration.GLEmulation.GL31, 3, 1);
+
+        return configuration;
+    }
+}
+
+/*
+ * Copyright 2020 damios
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+//Note, the above license and copyright applies to this file only.
+
+package io.github.jayhost.lwjgl3;
+
+import com.badlogic.gdx.Version;
+import com.badlogic.gdx.backends.lwjgl3.Lwjgl3NativesLoader;
+import org.lwjgl.system.macosx.LibC;
+import org.lwjgl.system.macosx.ObjCRuntime;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.InputStreamReader;
+import java.lang.management.ManagementFactory;
+import java.util.ArrayList;
+
+import static org.lwjgl.system.JNI.invokePPP;
+import static org.lwjgl.system.JNI.invokePPZ;
+import static org.lwjgl.system.macosx.ObjCRuntime.objc_getClass;
+import static org.lwjgl.system.macosx.ObjCRuntime.sel_getUid;
+
+/**
+ * Adds some utilities to ensure that the JVM was started with the
+ * {@code -XstartOnFirstThread} argument, which is required on macOS for LWJGL 3
+ * to function. Also helps on Windows when users have names with characters from
+ * outside the Latin alphabet, a common cause of startup crashes.
+ * <br>
+ * <a href="https://jvm-gaming.org/t/starting-jvm-on-mac-with-xstartonfirstthread-programmatically/57547">Based on this java-gaming.org post by kappa</a>
+ * @author damios
+ */
+public class StartupHelper {
+
+    private static final String JVM_RESTARTED_ARG = "jvmIsRestarted";
+
+    private StartupHelper() {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Starts a new JVM if the application was started on macOS without the
+     * {@code -XstartOnFirstThread} argument. This also includes some code for
+     * Windows, for the case where the user's home directory includes certain
+     * non-Latin-alphabet characters (without this code, most LWJGL3 apps fail
+     * immediately for those users). Returns whether a new JVM was started and
+     * thus no code should be executed.
+     * <p>
+     * <u>Usage:</u>
+     *
+     * <pre><code>
+     * public static void main(String... args) {
+     * 	if (StartupHelper.startNewJvmIfRequired(true)) return; // This handles macOS support and helps on Windows.
+     * 	// after this is the actual main method code
+     * }
+     * </code></pre>
+     *
+     * @param redirectOutput
+     *            whether the output of the new JVM should be rerouted to the
+     *            old JVM, so it can be accessed in the same place; keeps the
+     *            old JVM running if enabled
+     * @return whether a new JVM was started and thus no code should be executed
+     *         in this one
+     */
+    public static boolean startNewJvmIfRequired(boolean redirectOutput) {
+        String osName = System.getProperty("os.name").toLowerCase();
+        if (!osName.contains("mac")) {
+            if (osName.contains("windows")) {
+// Here, we are trying to work around an issue with how LWJGL3 loads its extracted .dll files.
+// By default, LWJGL3 extracts to the directory specified by "java.io.tmpdir", which is usually the user's home.
+// If the user's name has non-ASCII (or some non-alphanumeric) characters in it, that would fail.
+// By extracting to the relevant "ProgramData" folder, which is usually "C:\ProgramData", we avoid this.
+// We also temporarily change the "user.name" property to one without any chars that would be invalid.
+// We revert our changes immediately after loading LWJGL3 natives.
+                String programData = System.getenv("ProgramData");
+                if(programData == null) programData = "C:\\Temp\\"; // if ProgramData isn't set, try some fallback.
+                String prevTmpDir = System.getProperty("java.io.tmpdir", programData);
+                String prevUser = System.getProperty("user.name", "libGDX_User");
+                System.setProperty("java.io.tmpdir", programData + "/libGDX-temp");
+                System.setProperty("user.name", ("User_" + prevUser.hashCode() + "_GDX" + Version.VERSION).replace('.', '_'));
+                Lwjgl3NativesLoader.load();
+                System.setProperty("java.io.tmpdir", prevTmpDir);
+                System.setProperty("user.name", prevUser);
+            }
+            return false;
+        }
+
+        // There is no need for -XstartOnFirstThread on Graal native image
+        if (!System.getProperty("org.graalvm.nativeimage.imagecode", "").isEmpty()) {
+            return false;
+        }
+
+        // Checks if we are already on the main thread, such as from running via Construo.
+        long objc_msgSend = ObjCRuntime.getLibrary().getFunctionAddress("objc_msgSend");
+        long NSThread      = objc_getClass("NSThread");
+        long currentThread = invokePPP(NSThread, sel_getUid("currentThread"), objc_msgSend);
+        boolean isMainThread = invokePPZ(currentThread, sel_getUid("isMainThread"), objc_msgSend);
+        if(isMainThread) return false;
+
+        long pid = LibC.getpid();
+
+        // check whether -XstartOnFirstThread is enabled
+        if ("1".equals(System.getenv("JAVA_STARTED_ON_FIRST_THREAD_" + pid))) {
+            return false;
+        }
+
+        // check whether the JVM was previously restarted
+        // avoids looping, but most certainly leads to a crash
+        if ("true".equals(System.getProperty(JVM_RESTARTED_ARG))) {
+            System.err.println(
+                    "There was a problem evaluating whether the JVM was started with the -XstartOnFirstThread argument.");
+            return false;
+        }
+
+        // Restart the JVM with -XstartOnFirstThread
+        ArrayList<String> jvmArgs = new ArrayList<>();
+        String separator = System.getProperty("file.separator", "/");
+        // The following line is used assuming you target Java 8, the minimum for LWJGL3.
+        String javaExecPath = System.getProperty("java.home") + separator + "bin" + separator + "java";
+        // If targeting Java 9 or higher, you could use the following instead of the above line:
+        //String javaExecPath = ProcessHandle.current().info().command().orElseThrow();
+
+        if (!(new File(javaExecPath)).exists()) {
+            System.err.println(
+                    "A Java installation could not be found. If you are distributing this app with a bundled JRE, be sure to set the -XstartOnFirstThread argument manually!");
+            return false;
+        }
+
+        jvmArgs.add(javaExecPath);
+        jvmArgs.add("-XstartOnFirstThread");
+        jvmArgs.add("-D" + JVM_RESTARTED_ARG + "=true");
+        jvmArgs.addAll(ManagementFactory.getRuntimeMXBean().getInputArguments());
+        jvmArgs.add("-cp");
+        jvmArgs.add(System.getProperty("java.class.path"));
+        String mainClass = System.getenv("JAVA_MAIN_CLASS_" + pid);
+        if (mainClass == null) {
+            StackTraceElement[] trace = Thread.currentThread().getStackTrace();
+            if (trace.length > 0) {
+                mainClass = trace[trace.length - 1].getClassName();
+            } else {
+                System.err.println("The main class could not be determined.");
+                return false;
+            }
+        }
+        jvmArgs.add(mainClass);
+
+        try {
+            if (!redirectOutput) {
+                ProcessBuilder processBuilder = new ProcessBuilder(jvmArgs);
+                processBuilder.start();
+            } else {
+                Process process = (new ProcessBuilder(jvmArgs))
+                        .redirectErrorStream(true).start();
+                BufferedReader processOutput = new BufferedReader(
+                        new InputStreamReader(process.getInputStream()));
+                String line;
+
+                while ((line = processOutput.readLine()) != null) {
+                    System.out.println(line);
+                }
+
+                process.waitFor();
+            }
+        } catch (Exception e) {
+            System.err.println("There was a problem restarting the JVM");
+            e.printStackTrace();
+        }
+
+        return true;
+    }
+
+    /**
+     * Starts a new JVM if the application was started on macOS without the
+     * {@code -XstartOnFirstThread} argument. Returns whether a new JVM was
+     * started and thus no code should be executed. Redirects the output of the
+     * new JVM to the old one.
+     * <p>
+     * <u>Usage:</u>
+     *
+     * <pre>
+     * public static void main(String... args) {
+     * 	if (StartupHelper.startNewJvmIfRequired()) return; // This handles macOS support and helps on Windows.
+     * 	// the actual main method code
+     * }
+     * </pre>
+     *
+     * @return whether a new JVM was started and thus no code should be executed
+     *         in this one
+     */
+    public static boolean startNewJvmIfRequired() {
+        return startNewJvmIfRequired(true);
+    }
+}
+package io.github.jayhost;
+
+public class Box {
+    public Object value;
+
+    public Box(Object value) {
+        this.value = value;
+    }
+
+    public Object get() {
+        return value;
+    }
+
+    public void set(Object value) {
+        this.value = value;
+    }
+}
+
+// io/github/jayhost/LispBridge.java
+package io.github.jayhost;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class LispBridge {
+    private static final ArrayList<SpawnRequest> spawnList = new ArrayList<>();
+    private static final ArrayList<String> removalList = new ArrayList<>();
+
+    // Enqueue with position
+    public static void addEntityAt(Object path, Object x, Object y, Object z) {
+        String strPath = (String) path;
+        double dx = ((Number) x).doubleValue();
+        double dy = ((Number) y).doubleValue();
+        double dz = ((Number) z).doubleValue();
+        spawnList.add(new SpawnRequest(strPath, (float) dx, (float) dy, (float) dz));
+    }
+    public static List<SpawnRequest> drainSpawns() {
+        synchronized(spawnList) {
+            List<SpawnRequest> copy = new ArrayList<>(spawnList);
+            spawnList.clear();
+            return copy;
+        }
+    }
+
+    public static void removeEntity(Object path) {
+        removalList.add((String) path);
+    }
+    public static List<String> drainRemovals() {
+        synchronized(removalList) {
+            List<String> copy = new ArrayList<>(removalList);
+            removalList.clear();
+            return copy;
+        }
+    }
+}
+
+package io.github.jayhost;
+
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.Input;
+import com.badlogic.gdx.InputAdapter;
+import com.badlogic.gdx.graphics.PerspectiveCamera;
+import com.badlogic.gdx.math.Vector3;
+
+public class FPSController extends InputAdapter {
+    private final PerspectiveCamera cam;
+    private float yaw = 0f, pitch = 0f;
+    private final float rotSpeed = 0.002f; // tweak sensitivity
+    private final float moveSpeed = 2f;
+    private final Vector3 tmp = new Vector3();
+
+    public FPSController(PerspectiveCamera camera) {
+        this.cam = camera;
+        // Hide & grab cursor so it won't leave window
+        Gdx.input.setCursorCatched(true);
+        // Initialize yaw/pitch from cam.direction
+        Vector3 d = cam.direction.cpy().nor();
+        yaw   = (float)Math.atan2(d.x, -d.z);
+        pitch = (float)Math.asin(d.y);
+        // Center the cursor once
+        recenterMouse();
+    }
+
+    private void recenterMouse() {
+        int cx = Gdx.graphics.getWidth()/2;
+        int cy = Gdx.graphics.getHeight()/2;
+        Gdx.input.setCursorPosition(cx, cy);
+    }
+
+    public void update(float delta) {
+        // 1) Mouse look via center-cursor
+        int cx = Gdx.graphics.getWidth()/2;
+        int cy = Gdx.graphics.getHeight()/2;
+        int mx = Gdx.input.getX();
+        int my = Gdx.input.getY();
+        float dx = (mx - cx) * rotSpeed;
+        float dy = (my - cy) * rotSpeed;
+        if (dx != 0 || dy != 0) {
+            yaw   -= dx;
+            pitch -= dy;
+            pitch = Math.max(-1.5f, Math.min(1.5f, pitch));
+            float cosP = (float)Math.cos(pitch);
+            cam.direction.set(
+                (float)Math.sin(yaw) * cosP,
+                (float)Math.sin(pitch),
+                (float)-Math.cos(yaw) * cosP
+            );
+            cam.up.set(Vector3.Y);
+            cam.update();
+            // immediately recenter
+            recenterMouse();
+        }
+
+        // 2) WASD movement
+        tmp.set(cam.direction).nor().scl(moveSpeed * delta);
+        if (Gdx.input.isKeyPressed(Input.Keys.W)) cam.position.add(tmp);
+        if (Gdx.input.isKeyPressed(Input.Keys.S)) cam.position.sub(tmp);
+        Vector3 right = cam.direction.cpy().crs(cam.up).nor().scl(moveSpeed*delta);
+        if (Gdx.input.isKeyPressed(Input.Keys.D)) cam.position.add(right);
+        if (Gdx.input.isKeyPressed(Input.Keys.A)) cam.position.sub(right);
+
+        cam.update();
+    }
+
+    @Override
+    public boolean keyDown(int keycode) {
+        // allow escape to release cursor
+        if (keycode == Input.Keys.ESCAPE) {
+            Gdx.input.setCursorCatched(false);
+        }
+        return true;
+    }
+}
+
+package io.github.jayhost;
+
+import com.badlogic.gdx.math.Vector3;
+
+public class SpawnRequest {
+    public final String path;
+    public final Vector3 position;
+    public SpawnRequest(String path, float x, float y, float z) {
+        this.path = path;
+        this.position = new Vector3(x, y, z);
+    }
+}
+
+// File: io/github/jayhost/GBufferShader.java
+package io.github.jayhost;
+
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.graphics.g3d.Renderable;
+import com.badlogic.gdx.graphics.g3d.shaders.DefaultShader;
+
+public class GBufferShader extends DefaultShader {
+
+    // You should have already loaded these static sources in Main.create()
+    public static String vertexShaderSource;
+    public static String fragmentShaderSource;
+
+    // A static method to be called once from Main.create()
+    public static void initShaderSources() {
+        vertexShaderSource = Gdx.files.internal("shaders/gbuffer.vert").readString();
+        fragmentShaderSource = Gdx.files.internal("shaders/gbuffer.frag").readString();
+    }
+
+    public GBufferShader(Renderable renderable) {
+        // 1. Create a configuration object.
+        //    Pass your loaded GLSL sources here.
+        super(renderable, new DefaultShader.Config(vertexShaderSource, fragmentShaderSource));
+
+        // 2. The super(renderable, config) constructor handles EVERYTHING:
+        //    - It creates the ShaderProgram.
+        //    - It compiles the ShaderProgram.
+        //    - It calls init(), which populates the 'locations' array.
+        //
+        //    Your GBufferShader is now ready to be used.
+    }
+
+    // You can override other methods like begin(), render(), etc. if needed,
+    // but the core initialization is now handled correctly.
+    @Override
+    public void begin(com.badlogic.gdx.graphics.Camera camera, com.badlogic.gdx.graphics.g3d.utils.RenderContext context) {
+        // This call will now succeed because 'locations' is not null.
+        super.begin(camera, context);
+    }
+}
+
+// File: io/github/jayhost/GBufferShaderProvider.java
+package io.github.jayhost;
+
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.graphics.g3d.Renderable;
+import com.badlogic.gdx.graphics.g3d.Shader;
+import com.badlogic.gdx.graphics.g3d.utils.ShaderProvider;
+import com.badlogic.gdx.utils.Array; // For tracking
+import com.badlogic.gdx.utils.GdxRuntimeException;
+
+public class GBufferShaderProvider implements ShaderProvider {
+
+    // Keep track of all shaders this provider has EVER vended
+    // This is for debugging disposal, NOT for caching for reuse.
+    private static final Array<GBufferShader> allCreatedShaders = new Array<>(false, 16);
+
+    @Override
+    public Shader getShader(Renderable renderable) {
+        String renderableId = (renderable != null ? renderable.toString() : "null");
+        Gdx.app.log("GBufferShaderProvider (Tracking)", "getShader called for: " + renderableId);
+
+        GBufferShader shaderInstance;
+        Gdx.app.log("GBufferShaderProvider (Tracking)", "Creating NEW GBufferShader instance for: " + renderableId);
+        try {
+            shaderInstance = new GBufferShader(renderable); // Constructor handles its own program creation/compilation.
+            allCreatedShaders.add(shaderInstance); // Track it
+            Gdx.app.log("GBufferShaderProvider (Tracking)", "Tracking new shader: " + shaderInstance.toString());
+        } catch (Exception e) {
+            Gdx.app.error("GBufferShaderProvider (Tracking)", "Exception during GBufferShader instantiation for " + renderableId, e);
+            throw new GdxRuntimeException("Failed to instantiate GBufferShader for " + renderableId, e);
+        }
+
+        Gdx.app.log("GBufferShaderProvider (Tracking)", "New GBufferShader (" + shaderInstance.toString() + ") created, program should be valid. Program ID: " + shaderInstance.program.getHandle());
+
+        if (!shaderInstance.canRender(renderable)) {
+            Gdx.app.log("GBufferShaderProvider (Tracking)", "Newly created GBufferShader (" + shaderInstance.toString() + ") reports canRender() == false for: " + renderableId + ". Disposing it and returning NULL.");
+            shaderInstance.dispose(); // This will log from GBufferShader.dispose()
+            // DO NOT remove from allCreatedShaders here, we want to see its disposal log.
+            return null;
+        }
+
+        Gdx.app.log("GBufferShaderProvider (Tracking)", "Newly created GBufferShader (" + shaderInstance.toString() + ") is suitable. Returning it for: " + renderableId);
+        return shaderInstance;
+    }
+
+    @Override
+    public void dispose() {
+        Gdx.app.log("GBufferShaderProvider (Tracking)", "dispose() called on provider. Disposing all tracked shaders ("+allCreatedShaders.size+").");
+        for(GBufferShader shader : allCreatedShaders){
+            if(shader != null) { // Should not be null if added
+                Gdx.app.log("GBufferShaderProvider (Tracking)", "Disposing tracked shader from provider: " + shader.toString());
+                shader.dispose();
+            }
+        }
+        allCreatedShaders.clear();
+    }
+
+    // Static method to check if a shader is known and its state (for debugging from other places)
+    public static String getTrackedShaderInfo(Shader shader) {
+        if (shader == null) return "null_shader_instance_ref";
+        if (!(shader instanceof GBufferShader)) return "not_a_GBufferShader_instance";
+
+        GBufferShader gbShader = (GBufferShader) shader;
+        boolean isTracked = false; // Check if it's in our static list
+        for (GBufferShader s : allCreatedShaders) {
+            if (s == gbShader) {
+                isTracked = true;
+                break;
+            }
+        }
+
+        String programState = "PROGRAM_UNKNOWN";
+        String locationsState = "LOCATIONS_UNKNOWN";
+
+        if (gbShader.program == null) {
+            programState = "PROGRAM_NULL";
+        } else {
+            programState = "ProgramID:" + gbShader.program.getHandle() +
+                (gbShader.program.isCompiled() ? "_Compiled" : "_NOT_COMPILED");
+        }
+
+        // To check 'locations', we need to access it. It's protected in BaseShader.
+        // We can't directly access it here unless GBufferShader exposes it or a method.
+        // For now, let's assume if program is null, locations is also likely null due to dispose.
+        // The true test is the NullPointerException.
+
+        // Let's check if the shader instance itself believes it's disposed via a hypothetical flag
+        // (DefaultShader/BaseShader don't have a public 'isDisposed' flag)
+
+        return gbShader.toString() + " (TrackedByProvider: " + isTracked + ", State: " + programState + ")";
+    }
+}
+
+package io.github.jayhost;
+
+public class BinaryExpr extends Expr {
+    public final Expr left;
+    public final Token operator;
+    public final Expr right;
+
+    public BinaryExpr(Expr left, Token operator, Expr right, int line) {
+        super(line);
+        this.left = left;
+        this.operator = operator;
+        this.right = right;
+    }
+
+    @Override
+    public <R> R accept(Visitor<R> visitor) {
+        return visitor.visitBinaryExpr(this);
+    }
+}
+// ========================================================================
+// io/github/jayhost/BytecodeGenerator.java
+//
+// A utility class with static methods for generating common JVM
+// bytecode patterns using ASM.
+// ========================================================================
+package io.github.jayhost;
+
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Label;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Type;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+import static org.objectweb.asm.Opcodes.*;
+
+public class BytecodeGenerator {
+
+    public static void createConstructor(ClassWriter cw, String className, Map<String, Type> fields) {
+        StringBuilder desc = new StringBuilder("(");
+        List<Map.Entry<String,Type>> ordered = new ArrayList<>(fields.entrySet());
+        for (Map.Entry<String,Type> e : ordered) desc.append(e.getValue().getDescriptor());
+        desc.append(")V");
+
+        MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "<init>", desc.toString(), null, null);
+        mv.visitCode();
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitMethodInsn(INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        int slot = 1;
+        for (Map.Entry<String,Type> e : ordered) {
+            mv.visitVarInsn(ALOAD, 0);
+            mv.visitVarInsn(ALOAD, slot++);
+            mv.visitFieldInsn(PUTFIELD, className, e.getKey(), e.getValue().getDescriptor());
+        }
+        mv.visitInsn(RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
+    public static void addRuntimeHelpers(ClassWriter cw) {
+        addIsTruthyHelper(cw);
+        addBinaryOpHelper(cw, "op_add", DADD);
+        addBinaryOpHelper(cw, "op_sub", DSUB);
+        addBinaryOpHelper(cw, "op_mul", DMUL);
+        addBinaryOpHelper(cw, "op_div", DDIV);
+        addComparisonHelper(cw, "op_lt", IFLT);
+        addComparisonHelper(cw, "op_gt", IFGT); // FIXED: Added the greater-than helper.
+        addStringConcatHelper(cw);
+    }
+    
+    private static void addIsTruthyHelper(ClassWriter cw) {
+        MethodVisitor mv = cw.visitMethod(ACC_PUBLIC | ACC_STATIC, "isTruthy", "(Ljava/lang/Object;)Z", null, null);
+        mv.visitCode();
+        Label falseLbl = new Label();
+        Label endLbl   = new Label();
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitJumpInsn(IFNULL, falseLbl);
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitFieldInsn(GETSTATIC, "java/lang/Boolean", "FALSE", "Ljava/lang/Boolean;");
+        mv.visitJumpInsn(IF_ACMPEQ, falseLbl);
+        mv.visitInsn(ICONST_1);
+        mv.visitJumpInsn(GOTO, endLbl);
+        mv.visitLabel(falseLbl);
+        mv.visitInsn(ICONST_0);
+        mv.visitLabel(endLbl);
+        mv.visitInsn(IRETURN);
+        mv.visitMaxs(2, 1);
+        mv.visitEnd();
+    }
+    
+    private static void addBinaryOpHelper(ClassWriter cw, String name, int opcode) {
+        MethodVisitor mv = cw.visitMethod(ACC_PUBLIC | ACC_STATIC, name, "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", null, null);
+        mv.visitCode();
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitTypeInsn(CHECKCAST, "java/lang/Number");
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Number", "doubleValue", "()D", false);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitTypeInsn(CHECKCAST, "java/lang/Number");
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Number", "doubleValue", "()D", false);
+        mv.visitInsn(opcode);
+        mv.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false);
+        mv.visitInsn(ARETURN);
+        mv.visitMaxs(4, 2);
+        mv.visitEnd();
+    }
+
+    private static void addComparisonHelper(ClassWriter cw, String name, int jump) {
+        MethodVisitor mv = cw.visitMethod(ACC_PUBLIC | ACC_STATIC, name, "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", null, null);
+        mv.visitCode();
+        Label trueLbl = new Label();
+        Label endLbl  = new Label();
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitTypeInsn(CHECKCAST, "java/lang/Number");
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Number", "doubleValue", "()D", false);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitTypeInsn(CHECKCAST, "java/lang/Number");
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Number", "doubleValue", "()D", false);
+        mv.visitInsn(DCMPL);
+        mv.visitJumpInsn(jump, trueLbl);
+        mv.visitFieldInsn(GETSTATIC, "java/lang/Boolean", "FALSE", "Ljava/lang/Boolean;");
+        mv.visitJumpInsn(GOTO, endLbl);
+        mv.visitLabel(trueLbl);
+        mv.visitFieldInsn(GETSTATIC, "java/lang/Boolean", "TRUE", "Ljava/lang/Boolean;");
+        mv.visitLabel(endLbl);
+        mv.visitInsn(ARETURN);
+        mv.visitMaxs(4, 2);
+        mv.visitEnd();
+    }
+
+    private static void addStringConcatHelper(ClassWriter cw) {
+        MethodVisitor mv = cw.visitMethod(
+                ACC_PUBLIC | ACC_STATIC,
+                "op_string_concat",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;", // correct descriptor
+                null,
+                null);
+        mv.visitCode();
+    
+        mv.visitTypeInsn(NEW, "java/lang/StringBuilder");
+        mv.visitInsn(DUP);
+        mv.visitMethodInsn(INVOKESPECIAL,
+                           "java/lang/StringBuilder",
+                           "<init>",
+                           "()V",
+                           false);
+    
+        // append first arg
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitMethodInsn(INVOKEVIRTUAL,
+                           "java/lang/StringBuilder",
+                           "append",
+                           "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
+                           false);
+    
+        // append second arg
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(INVOKEVIRTUAL,
+                           "java/lang/StringBuilder",
+                           "append",
+                           "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
+                           false);
+    
+        // toString
+        mv.visitMethodInsn(INVOKEVIRTUAL,
+                           "java/lang/StringBuilder",
+                           "toString",
+                           "()Ljava/lang/String;",
+                           false);
+    
+        mv.visitInsn(ARETURN);
+        mv.visitMaxs(3, 2);   // 3 stack elements max, 2 locals (arg0, arg1)
+        mv.visitEnd();
+    }
+}
+
+// ========================================================================
+// io/github/jayhost/CallCompiler.java
+//
+// Handles the compilation of built-in operators and function calls.
+// ========================================================================
+package io.github.jayhost;
+
+import org.objectweb.asm.MethodVisitor;
+import java.util.List;
+import static org.objectweb.asm.Opcodes.*;
+
+public class CallCompiler {
+    private final ExpressionCompiler parent;
+    private final CompilationContext ctx;
+
+    public CallCompiler(ExpressionCompiler parent, CompilationContext ctx) {
+        this.parent = parent;
+        this.ctx = ctx;
+    }
+
+    public void compileFunctionCall(ListExpr callExpr, MethodVisitor mv) {
+        if (callExpr.elements.get(0) instanceof SymbolExpr sym && Helpers.isBuiltIn(sym.name)) {
+            compileBuiltInOperator(callExpr, mv);
+            return;
+        }
+
+        int argc = callExpr.elements.size() - 1;
+        mv.visitLdcInsn(argc);
+        mv.visitTypeInsn(ANEWARRAY, "java/lang/Object");
+        for (int i = 0; i < argc; i++) {
+            mv.visitInsn(DUP);
+            mv.visitLdcInsn(i);
+            parent.compileExpression(callExpr.elements.get(i + 1), mv);
+            mv.visitInsn(AASTORE);
+        }
+        parent.compileExpression(callExpr.elements.get(0), mv);
+        mv.visitInsn(SWAP);
+        mv.visitMethodInsn(INVOKEINTERFACE, "io/github/jayhost/LispCallable",
+                           "apply", "([Ljava/lang/Object;)Ljava/lang/Object;", true);
+    }
+    
+    private void compileBuiltInOperator(ListExpr opExpr, MethodVisitor mv) {
+        String opName = ((SymbolExpr) opExpr.elements.get(0)).name;
+        for (int i = 1; i < opExpr.elements.size(); i++) {
+            parent.compileExpression(opExpr.elements.get(i), mv);
+        }
+        String helperMethod = Helpers.getValidMethodNameForOperator(opName);
+        String descriptor = opName.equals("string-concat") 
+            ? "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;"
+            : "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        mv.visitMethodInsn(INVOKESTATIC, parent.getRootClassName(), helperMethod, descriptor, false);
+    }
+}
+
+// ========================================================================
+// io/github/jayhost/CaptureAnalyzer.java
+//
+// Analyzes an expression to find all free variables that need to be
+// captured from an enclosing scope.
+// ========================================================================
+package io.github.jayhost;
+
+import java.util.HashSet;
+import java.util.Set;
+
+public class CaptureAnalyzer {
+
+    public static Set<String> findCapturedVars(Expr expr, Set<String> localScope, LispJitCompiler compiler) {
+        Set<String> captured = new HashSet<>();
+        find(expr, localScope, captured, compiler);
+        return captured;
+    }
+
+    private static void find(Expr expr, Set<String> localScope, Set<String> captured, LispJitCompiler compiler) {
+        Environment env = compiler.getEnvironment();
+
+        if (expr instanceof SymbolExpr sym) {
+            String n = sym.name;
+            if (!Helpers.isBuiltIn(n) && !localScope.contains(n) &&
+                !env.functionTable.containsKey(n) && !env.globalVarTable.containsKey(n)) {
+                captured.add(n);
+            }
+        } else if (expr instanceof ListExpr list) {
+            if (list.elements.isEmpty()) return;
+            String opName = (list.elements.get(0) instanceof SymbolExpr)
+                ? ((SymbolExpr) list.elements.get(0)).name : "";
+
+            switch (opName) {
+                case "let":
+                    analyzeLet(list, localScope, captured, compiler);
+                    break;
+                case "lambda":
+                    // Lambdas are opaque; their bodies are analyzed when they are compiled,
+                    // not during capture analysis of an outer scope.
+                    break; 
+                case "if":
+                case "java-call":
+                    // FIXED: For 'if' and 'java-call', which are special syntax,
+                    // we only analyze their arguments (from index 1 onwards) for captures.
+                    for (int i = 1; i < list.elements.size(); i++) {
+                        find(list.elements.get(i), localScope, captured, compiler);
+                    }
+                    break;
+                default:
+                    // For a normal function call, we must analyze all elements.
+                    // The first element is the function itself, which could be a captured closure.
+                    for (Expr element : list.elements) {
+                        find(element, localScope, captured, compiler);
+                    }
+                    break;
+            }
+        }
+    }
+
+    private static void analyzeLet(ListExpr list, Set<String> localScope, Set<String> captured, LispJitCompiler compiler) {
+        Set<String> letScope = new HashSet<>(localScope);
+        ListExpr bindings = (ListExpr) list.elements.get(1);
+        for (int i = 0; i < bindings.elements.size(); i += 2) {
+            // Analyze the binding's value expression within the current scope.
+            find(bindings.elements.get(i + 1), letScope, captured, compiler);
+            // Then add the new variable to the scope for subsequent expressions.
+            letScope.add(((SymbolExpr) bindings.elements.get(i)).name);
+        }
+        // Analyze the body of the 'let' with the newly extended scope.
+        for (int i = 2; i < list.elements.size(); i++) {
+            find(list.elements.get(i), letScope, captured, compiler);
+        }
+    }
+}
+
+package io.github.jayhost;
+
+public class DynamicClassLoader extends ClassLoader {
+    public Class<?> defineClass(String name, byte[] b) {
+        // The defineClass method is inherited from ClassLoader and does the magic.
+        return defineClass(name, b, 0, b.length);
+    }
+}
+
+package io.github.jayhost;
+
+import java.util.List;
+
+public abstract class Expr {
+    public final int line;
+
+    protected Expr(int line) {
+        this.line = line;
+    }
+
+    // The Visitor pattern is not used by the JIT, but it's good practice
+    // to keep it if you want to support other backends (like the interpreter).
+    public interface Visitor<R> {
+        R visitNumberExpr(NumberExpr expr);
+        R visitStringExpr(StringExpr expr);
+        R visitSymbolExpr(SymbolExpr expr);
+        R visitListExpr(ListExpr expr);
+        R visitBinaryExpr(BinaryExpr expr);
+    }
+    public abstract <R> R accept(Visitor<R> visitor);
+}
+
+class NumberExpr extends Expr {
+    public final double value;
+    public NumberExpr(double value, int line) {
+        super(line);
+        this.value = value;
+    }
+    public <R> R accept(Visitor<R> visitor) { return visitor.visitNumberExpr(this); }
+}
+
+class StringExpr extends Expr {
+    public final String value;
+    public StringExpr(String value, int line) {
+        super(line);
+        this.value = value;
+    }
+    public <R> R accept(Visitor<R> visitor) { return visitor.visitStringExpr(this); }
+}
+
+class SymbolExpr extends Expr {
+    public final String name;
+    public SymbolExpr(String name, int line) {
+        super(line);
+        this.name = name;
+    }
+    public <R> R accept(Visitor<R> visitor) { return visitor.visitSymbolExpr(this); }
+}
+
+class ListExpr extends Expr {
+    public final List<Expr> elements;
+    public ListExpr(List<Expr> elements, int line) {
+        super(line);
+        this.elements = elements;
+    }
+    public <R> R accept(Visitor<R> visitor) { return visitor.visitListExpr(this); }
+}
+
+// ========================================================================
+// io/github/jayhost/ExpressionCompiler.java
+//
+// Compiles individual Lisp expressions into bytecode.
+// ========================================================================
+package io.github.jayhost;
+
+import org.objectweb.asm.MethodVisitor;
+import static org.objectweb.asm.Opcodes.*;
+
+public class ExpressionCompiler {
+    public final LispJitCompiler compiler;
+    private final CompilationContext ctx;
+
+    public ExpressionCompiler(LispJitCompiler compiler, CompilationContext ctx) {
+        this.compiler = compiler;
+        this.ctx = ctx;
+    }
+
+    public void compileExpression(Expr expr, MethodVisitor mv) {
+        if (expr instanceof NumberExpr num) {
+            mv.visitLdcInsn(num.value);
+            mv.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false);
+        } else if (expr instanceof StringExpr str) {
+            mv.visitLdcInsn(str.value);
+        } else if (expr instanceof SymbolExpr sym) {
+            compileSymbol(sym.name, mv);
+        } else if (expr instanceof ListExpr list) {
+            compileList(list, mv);
+        } else {
+            throw new IllegalArgumentException("Unknown expression type: " + expr);
+        }
+    }
+
+    private void compileList(ListExpr list, MethodVisitor mv) {
+        if (list.elements.isEmpty()) { mv.visitInsn(ACONST_NULL); return; }
+        if (!(list.elements.get(0) instanceof SymbolExpr opSym)) {
+            new CallCompiler(this, ctx).compileFunctionCall(list, mv); return;
+        }
+        SpecialFormCompiler sfCompiler = new SpecialFormCompiler(this, ctx);
+        if (sfCompiler.compileSpecialForm(opSym.name, list, mv)) { return; }
+        new CallCompiler(this, ctx).compileFunctionCall(list, mv);
+    }
+
+    private void compileSymbol(String name, MethodVisitor mv) {
+        // Get the shared environment from the compiler
+        Environment env = compiler.getEnvironment();
+
+        if (ctx.localVars.containsKey(name)) {
+            mv.visitVarInsn(ALOAD, ctx.localVars.get(name));
+        } else if (ctx.capturedVars.contains(name)) {
+            mv.visitVarInsn(ALOAD, 0);
+            mv.visitFieldInsn(GETFIELD, ctx.className, name, "Ljava/lang/Object;");
+        } else if (env.functionTable.containsKey(name)) { // <-- FIXED
+            mv.visitFieldInsn(GETSTATIC, getRootClassName(), name, "Lio/github/jayhost/LispCallable;");
+        } else if (env.globalVarTable.containsKey(name)) { // <-- FIXED
+            mv.visitFieldInsn(GETSTATIC, getRootClassName(), name, "Ljava/lang/Object;");
+        } else {
+            throw new RuntimeException("Unresolved symbol: " + name);
+        }
+    }
+
+    String getRootClassName() {
+        return ctx.parentClassName != null ? ctx.parentClassName : ctx.className;
+    }
+}
+
+// ========================================================================
+// io/github/jayhost/JitDriver.java
+//
+// The main driver, updated to work with the new stateful compiler.
+// ========================================================================
+package io.github.jayhost;
+
+import java.util.List;
+
+public class JitDriver {
+
+    public static void main(String[] args) throws Exception {
+        // --- Test 1: Fibonacci ---
+        runFibonacciBenchmark();
+
+        // --- Test 2: Let Bindings ---
+        runLetBindingTest();
+
+        // --- Test 3: Closures and Lambdas ---
+        runClosureTest();
+
+        // --- Test 4: Strings and Java Interop ---
+        runStringAndInteropTest();
+    }
+
+    public static void runFibonacciBenchmark() throws Exception {
+        String source =
+                "(def (fib n) (if (< n 2.0) n (+ (fib (- n 1.0)) (fib (- n 2.0)))))" +
+                "(fib 35.0)";
+
+        System.out.println("\n--- Fibonacci Benchmark (n=35) ---");
+
+        Parser parser = new Parser(source);
+        List<Expr> asts = parser.parseMultiple();
+        LispJitCompiler compiler = new LispJitCompiler(new Environment()); // <-- FIXED
+        LispCallable fib35 = compiler.compile(asts);
+
+        System.out.println("Executing compiled fib(35)...");
+        long startTime = System.nanoTime();
+        Object result = fib35.apply(); // The main callable takes no args
+        long endTime = System.nanoTime();
+
+        System.out.println("=====================================");
+        System.out.println("Fib(35) Result: " + result);
+        System.out.println("JIT Execution Time: " + (endTime - startTime) / 1_000_000.0 + " ms");
+        System.out.println("=====================================");
+    }
+
+    public static void runLetBindingTest() throws Exception {
+        String source =
+                ";; A function using 'let' for local variables\n" +
+                "(def (test-let x)\n" +
+                "  (let (y (+ x 5.0) z 2.0)\n" +
+                "    (* y z)))\n" +
+                "\n" +
+                ";; Call the function. Expected: (10 + 5) * 2 = 30\n" +
+                "(test-let 10.0)";
+
+        System.out.println("\n--- Let Binding Test ---");
+        System.out.println("Lisp Source:\n" + source);
+
+        Parser parser = new Parser(source);
+        List<Expr> asts = parser.parseMultiple();
+        LispJitCompiler compiler = new LispJitCompiler(new Environment()); // <-- FIXED
+        LispCallable letTest = compiler.compile(asts);
+
+        System.out.println("Executing compiled let-test...");
+        Object result = letTest.apply();
+
+        System.out.println("=====================================");
+        System.out.println("Result of (test-let 10.0): " + result);
+        System.out.println("=====================================");
+    }
+
+    public static void runClosureTest() throws Exception {
+        String source =
+                ";; A higher-order function that returns a closure.\n" +
+                "(def (make-adder x)\n" +
+                "  ;; This lambda captures 'x' from the parent scope.\n" +
+                "  (lambda (y) (+ x y)))\n" +
+                "\n" +
+                ";; Create a specific 'add-5' closure.\n" +
+                "(let (add5 (make-adder 5.0))\n" +
+                "  ;; Call the closure.\n" +
+                "  (add5 10.0)) ;; Expected: 15.0";
+
+        System.out.println("\n--- Closure 'lambda' Test ---");
+        System.out.println("Lisp Source:\n" + source);
+
+        Parser parser = new Parser(source);
+        List<Expr> asts = parser.parseMultiple();
+        LispJitCompiler compiler = new LispJitCompiler(new Environment()); // <-- FIXED
+        LispCallable closureTest = compiler.compile(asts);
+
+        System.out.println("Executing compiled closure test...");
+        Object result = closureTest.apply();
+
+        System.out.println("=====================================");
+        System.out.println("Result of closure test: " + result);
+        System.out.println("=====================================");
+    }
+
+    public static void runStringAndInteropTest() throws Exception {
+        String source =
+                ";; --- String and Java Interop Test ---\n" +
+                ";; Concatenate two strings.\n" +
+                "(let (greeting (string-concat \"Hello, \" \"World!\"))\n" +
+                "  ;; Call a static Java method: System.out.println(greeting)\n" +
+                "  (java-call \"java.lang.System\" \"out\" \"println\" greeting))";
+
+        System.out.println("\n--- String and Java Interop Test ---");
+        System.out.println("Lisp Source:\n" + source);
+
+        Parser parser = new Parser(source);
+        List<Expr> asts = parser.parseMultiple();
+        LispJitCompiler compiler = new LispJitCompiler(new Environment()); // <-- FIXED
+        LispCallable interopTest = compiler.compile(asts);
+
+        System.out.println("Executing compiled string/interop test...");
+        Object result = interopTest.apply(); // Should print "Hello, World!"
+
+        System.out.println("=====================================");
+        System.out.println("Result of interop test (should be null): " + result);
+        System.out.println("=====================================");
+    }
+}
+
+// ========================================================================
+// io/github/jayhost/Helpers.java
+//
+// Miscellaneous helper methods and data structures for the JIT compiler.
+// ========================================================================
+package io.github.jayhost;
+
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Type;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+
+record FunctionSignature(String name, int argCount, String descriptor) {
+    FunctionSignature(String name, int argCount) {
+        this(name, argCount, "([Ljava/lang/Object;)Ljava/lang/Object;");
+    }
+}
+
+// Converted from a record to a class to allow for mutable state required by the compiler.
+class CompilationContext {
+    public final String className;
+    public final String parentClassName;
+    public final Map<String, Integer> localVars;
+    public final Set<String> capturedVars;
+    public final ClassWriter classWriter;
+    public int nextVarIndex;
+
+    public CompilationContext(String className, String parentClassName, Map<String, Integer> localVars, Set<String> capturedVars) {
+        this.className = className;
+        this.parentClassName = parentClassName;
+        this.localVars = localVars != null ? new HashMap<>(localVars) : new HashMap<>();
+        this.capturedVars = capturedVars != null ? capturedVars : Collections.emptySet();
+        this.classWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
+        // Default starting index for local variables. Callers can modify this as needed.
+        this.nextVarIndex = 1;
+    }
+}
+
+class Helpers {
+    public static boolean isSpecialForm(Expr expr, String name) {
+        return (expr instanceof ListExpr list &&
+               !list.elements.isEmpty() &&
+               list.elements.get(0) instanceof SymbolExpr sym &&
+               sym.name.equals(name));
+    }
+    public static boolean isBuiltIn(String n) {
+        // FIXED: Added ">" to the list of recognized built-in operators.
+        return switch (n) { case "+", "-", "*", "/", "<", ">", "string-concat" -> true; default -> false; };
+    }
+    public static String getValidMethodNameForOperator(String op) {
+        return switch (op) {
+            case "+" -> "op_add";
+            case "-" -> "op_sub";
+            case "*" -> "op_mul";
+            case "/" -> "op_div";
+            case "<" -> "op_lt";
+            case ">" -> "op_gt"; // FIXED: Added a corresponding method name for ">".
+            case "string-concat" -> "op_string_concat";
+            default -> throw new IllegalArgumentException("Bad op: " + op);
+        };
+    }
+    public static String getClassNameFromBytecode(byte[] bc) {
+        return new ClassReader(bc).getClassName();
+    }
+}
+
+// ========================================================================
+// io/github/jayhost/LambdaCompiler.java
+//
+// Compiles a Lisp function or lambda into a new JVM class.
+// ========================================================================
+package io.github.jayhost;
+
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Type;
+
+import java.util.*;
+import static org.objectweb.asm.Opcodes.*;
+
+public class LambdaCompiler {
+    private final LispJitCompiler compiler;
+
+    public LambdaCompiler(LispJitCompiler compiler) {
+        this.compiler = compiler;
+    }
+
+    public byte[] compileFunction(ListExpr defOrLambda,
+                              String parentClassName,
+                              Map<String,Integer> parentScope) {
+
+    boolean isLambda =
+        (defOrLambda.elements.get(0) instanceof SymbolExpr head) &&
+        "lambda".equals(head.name);
+
+    /* ---------- split out proto, params, body ---------- */
+    List<SymbolExpr> params = new ArrayList<>();
+    Expr             body;
+    String           funcName;
+
+    if (isLambda) {
+        // (lambda (p1 p2 ...) body)
+        ListExpr paramList = (ListExpr) defOrLambda.elements.get(1);
+        for (Expr p : paramList.elements) params.add((SymbolExpr) p);
+        body      = defOrLambda.elements.get(2);
+        funcName  = "_lambda_" + LispJitCompiler.DYNAMIC_CLASS_COUNTER.incrementAndGet();
+    } else {
+        // (def (name p1 p2 ...) body)   ← existing path
+        ListExpr proto = (ListExpr) defOrLambda.elements.get(1);
+        funcName = ((SymbolExpr) proto.elements.get(0)).name;
+        for (int i = 1; i < proto.elements.size(); i++)
+            params.add((SymbolExpr) proto.elements.get(i));
+        body = defOrLambda.elements.get(2);
+    }
+    String className = "io/github/jayhost/dynamic/Lambda_" + funcName + "_" +
+    LispJitCompiler.DYNAMIC_CLASS_COUNTER.incrementAndGet();
+        // The scope for capture analysis contains ONLY the function's own parameters.
+        Set<String> analysisScope = new HashSet<>();
+        for (SymbolExpr p : params) analysisScope.add(p.name);
+        Set<String> captured = CaptureAnalyzer.findCapturedVars(body, analysisScope, compiler);
+
+        // The compilation context for the body has the parameters as its local variables.
+        CompilationContext ctx = new CompilationContext(className, parentClassName, new HashMap<>(), captured);
+        
+        ctx.classWriter.visit(V1_8, ACC_PUBLIC | ACC_SUPER, className, null, "java/lang/Object",
+                new String[]{Type.getInternalName(LispCallable.class)});
+                // if (captured.isEmpty()) {
+                //     // Only add a no-arg constructor if BytecodeGenerator.createConstructor won't
+                //     MethodVisitor init = ctx.classWriter.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null);
+                //     init.visitCode();
+                //     init.visitVarInsn(ALOAD, 0);
+                //     init.visitMethodInsn(INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+                //     init.visitInsn(RETURN);
+                //     init.visitMaxs(1, 1);
+                //     init.visitEnd();
+                // }
+        BytecodeGenerator.addRuntimeHelpers(ctx.classWriter);
+        
+        Map<String, Type> fields = new LinkedHashMap<>();
+        for (String v : captured) {
+            ctx.classWriter.visitField(
+                    ACC_PRIVATE | ACC_FINAL,
+                    v,
+                    "Ljava/lang/Object;",   // descriptor
+                    null,
+                    null).visitEnd();
+        
+            fields.put(v, Type.getType(Object.class));
+        }
+        BytecodeGenerator.createConstructor(ctx.classWriter, className, fields);
+
+        MethodVisitor mv = ctx.classWriter.visitMethod(ACC_PUBLIC, "apply", "([Ljava/lang/Object;)Ljava/lang/Object;", null, null);
+        mv.visitCode();
+        ctx.nextVarIndex = 2;
+        for (int i = 0; i < params.size(); i++) {
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitLdcInsn(i);
+            mv.visitInsn(AALOAD);
+            int slot = ctx.nextVarIndex++;
+            mv.visitVarInsn(ASTORE, slot);
+            ctx.localVars.put(params.get(i).name, slot);
+        }
+        
+        new ExpressionCompiler(compiler, ctx).compileExpression(body, mv);
+        mv.visitInsn(ARETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+        ctx.classWriter.visitEnd();
+        return ctx.classWriter.toByteArray();
+    }
+}
+
+// ========================================================================
+// io/github/jayhost/LispCallable.java
+//
+// A new, unified interface for all executable Lisp objects,
+// both functions and closures.
+// ========================================================================
+package io.github.jayhost;
+
+@FunctionalInterface
+public interface LispCallable {
+    /**
+     * Applies the function or closure to the given arguments.
+     * @param args The arguments to the function.
+     * @return The result of the function application.
+     */
+    Object apply(Object... args) throws Exception;
+}
+
+// ========================================================================
+// io/github/jayhost/LispJitCompiler.java
+//
+// The core orchestrator for the JIT compilation process. It now operates
+// on a shared Environment to maintain state across compilations.
+// ========================================================================
+package io.github.jayhost;
+
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Type;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
+
+import static org.objectweb.asm.Opcodes.*;
+
+public class LispJitCompiler {
+    public static final AtomicLong DYNAMIC_CLASS_COUNTER = new AtomicLong();
+    private final DynamicClassLoader classLoader = new DynamicClassLoader();
+    private final Environment env; // <-- The shared environment
+
+    /**
+     * Constructs a JIT compiler that will operate on a given environment.
+     * @param env The shared environment for functions and variables.
+     */
+    public LispJitCompiler(Environment env) {
+        this.env = env;
+    }
+
+    /**
+     * Returns the environment associated with this compiler.
+     * @return The shared Environment object.
+     */
+    public Environment getEnvironment() {
+        return this.env;
+    }
+    
+    /**
+     * Defines a class using the internal dynamic class loader. This provides
+     * controlled access without exposing the class loader itself.
+     * @param name The fully qualified name of the class to define.
+     * @param bytecode The class's raw bytecode.
+     * @return The newly loaded Class object.
+     */
+    public Class<?> defineClass(String name, byte[] bytecode) {
+        return classLoader.defineClass(name, bytecode);
+    }
+
+    public LispCallable compile(List<Expr> topLevelForms) throws Exception {
+        // NOTE: We NO LONGER clear the tables here. State is now persistent
+        // in the shared 'env' object.
+
+        String mainClassName = "io/github/jayhost/dynamic/LispScript" + DYNAMIC_CLASS_COUNTER.incrementAndGet();
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(V1_8, ACC_PUBLIC | ACC_SUPER, mainClassName, null, "java/lang/Object",
+                new String[]{Type.getInternalName(LispCallable.class)});
+        BytecodeGenerator.addRuntimeHelpers(cw);
+        BytecodeGenerator.createConstructor(cw, mainClassName, Collections.emptyMap());
+        
+        // Pass 1: Discover top-level definitions and add them to the shared environment
+        for (Expr form : topLevelForms) {
+            if (Helpers.isSpecialForm(form, "def")) {
+                ListExpr defList = (ListExpr) form;
+                ListExpr proto = (ListExpr) defList.elements.get(1);
+                String fname = ((SymbolExpr) proto.elements.get(0)).name;
+                // Add to the shared environment's function table
+                env.functionTable.put(fname, new FunctionSignature(fname, proto.elements.size() - 1));
+            } else if (Helpers.isSpecialForm(form, "defvar")) {
+                String varName = ((SymbolExpr) ((ListExpr) form).elements.get(1)).name;
+                // Add to the shared environment's variable table
+                env.globalVarTable.put(varName, Type.getType(Object.class));
+            }
+        }
+
+        // Pass 2: Compile
+        TopLevelCompiler topLevelCompiler = new TopLevelCompiler(this, cw, mainClassName);
+        Expr lastExpr = topLevelCompiler.compileTopLevelForms(topLevelForms);
+
+        // Compile the main `apply` method to execute the last expression
+        MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "apply", "([Ljava/lang/Object;)Ljava/lang/Object;", null, null);
+        mv.visitCode();
+        if (lastExpr != null) {
+            CompilationContext mainCtx = new CompilationContext(mainClassName, null, Collections.emptyMap(), Collections.emptySet());
+            ExpressionCompiler exprCompiler = new ExpressionCompiler(this, mainCtx);
+            exprCompiler.compileExpression(lastExpr, mv);
+        } else {
+            mv.visitInsn(ACONST_NULL);
+        }
+        mv.visitInsn(ARETURN);
+        mv.visitMaxs(0, 0); // COMPUTE_MAXS will calculate this
+        mv.visitEnd();
+        cw.visitEnd();
+
+        byte[] bytecode = cw.toByteArray();
+        Class<?> clazz = defineClass(mainClassName.replace('/', '.'), bytecode);
+        return (LispCallable) clazz.getDeclaredConstructor().newInstance();
+    }
+}
+
+package io.github.jayhost;
+
+public class ParseException extends Exception {
+    public ParseException(String message) {
+        super(message);
+    }
+}
+
+package io.github.jayhost;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Parser {
+    private final String source;
+    private int current = 0;
+    private int line = 1;
+
+    public Parser(String source) {
+        this.source = source;
+    }
+
+    /**
+     * Parses a script with multiple top-level forms.
+     * @return A list of ASTs.
+     */
+    public List<Expr> parseMultiple() throws ParseException {
+        List<Expr> expressions = new ArrayList<>();
+        while (!isAtEnd()) {
+            skipWhitespace();
+            // Stop if we've reached the end after skipping whitespace
+            if (isAtEnd()) break;
+            expressions.add(parseExpr());
+        }
+        return expressions;
+    }
+    
+    public Expr parse() throws ParseException {
+        skipWhitespace();
+        if (isAtEnd()) {
+            throw new ParseException("Empty input");
+        }
+        Expr expr = parseExpr();
+        skipWhitespace();
+        if (!isAtEnd() && peek() != ';') { // Allow comments at the end
+            throw new ParseException("Unexpected characters at end: '" + peek() + "'");
+        }
+        return expr;
+    }
+
+    private Expr parseExpr() throws ParseException {
+        skipWhitespace();
+        return parsePrimary();
+    }
+
+    private Expr parsePrimary() throws ParseException {
+        skipWhitespace();
+        char c = peek();
+        if (c == ';') {
+            skipComment();
+            return parseExpr(); // Try parsing the next expression
+        }
+        if (c == '(') {
+            return parseList();
+        } else if (c == '"') {
+            return parseString();
+        } else {
+            return parseAtom();
+        }
+    }
+
+    private Expr parseString() throws ParseException {
+        int startLine = line;
+        consume('"'); // Consume the opening quote
+        StringBuilder sb = new StringBuilder();
+        while (!isAtEnd() && peek() != '"') {
+            // Here you could handle escape sequences like \n or \" if you wanted
+            sb.append(advance());
+        }
+        if (isAtEnd()) {
+            throw new ParseException("Unterminated string literal.");
+        }
+        consume('"'); // Consume the closing quote
+        return new StringExpr(sb.toString(), startLine);
+    }
+    
+    
+    private Expr parseList() throws ParseException {
+        int startLine = line;
+        consume('(');
+        List<Expr> elements = new ArrayList<>();
+        while (!isAtEnd() && peek() != ')') {
+            elements.add(parseExpr());
+            skipWhitespace();
+        }
+        if (isAtEnd()) {
+            throw new ParseException("Unexpected end of input in list");
+        }
+        consume(')');
+        return new ListExpr(elements, startLine);
+    }
+    
+    private Expr parseAtom() throws ParseException {
+        int startLine = line;
+        StringBuilder sb = new StringBuilder();
+        while (!isAtEnd() && !Character.isWhitespace(peek()) && peek() != '(' && peek() != ')') {
+            sb.append(advance());
+        }
+        String token = sb.toString();
+        if (token.isEmpty()) {
+            throw new ParseException("Empty token");
+        }
+        try {
+            // Avoid parsing special symbols as numbers
+            if(token.equals("+") || token.equals("-")) throw new NumberFormatException();
+            return new NumberExpr(Double.parseDouble(token), startLine);
+        } catch (NumberFormatException e) {
+            return new SymbolExpr(token, startLine);
+        }
+    }
+
+    private char peek() {
+        if (isAtEnd()) return '\0';
+        return source.charAt(current);
+    }
+
+    private char advance() {
+        char c = source.charAt(current++);
+        if (c == '\n') {
+            line++;
+        }
+        return c;
+    }
+
+    private void skipWhitespace() {
+        while (!isAtEnd()) {
+            char c = peek();
+            if (c == ' ' || c == '\r' || c == '\t' || c == '\n') {
+                advance();
+            } else if (c == ';') { // Handle comments as whitespace
+                skipComment();
+            }
+            else {
+                break;
+            }
+        }
+    }
+    
+    private void skipComment() {
+        while (!isAtEnd() && peek() != '\n') {
+            advance();
+        }
+    }
+
+    private boolean isAtEnd() {
+        return current >= source.length();
+    }
+
+    private void consume(char expected) throws ParseException {
+        if (isAtEnd() || peek() != expected) {
+            throw new ParseException("Expected '" + expected + "' but found '" + peek() + "'");
+        }
+        advance();
+    }
+}
+
+// ========================================================================
+// io/github/jayhost/ReplSession.java
+//
+// Tiny read-eval-print loop that uses a stateful LispJitCompiler.
+// Can be embedded in an application with a shared environment.
+// Type :quit (or Ctrl-D) to exit the standalone REPL.
+// ========================================================================
+package io.github.jayhost;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * One interactive session. Keeps a global environment alive by using a
+ * stateful compiler that operates on a shared Environment object.
+ */
+public final class ReplSession {
+
+    /** The JIT compiler that holds the session's state and environment. */
+    private final LispJitCompiler jit;
+
+    /** Accumulates all top-level definition forms to provide context to the compiler. */
+    private final List<Expr> topLevelForms;
+
+    /**
+     * Constructs a new REPL session with its own isolated environment.
+     */
+    public ReplSession() {
+        this(new Environment());
+    }
+
+    /**
+     * Constructs a new REPL session that uses a shared environment.
+     * This is crucial for embedding the interpreter in another application.
+     *
+     * @param sharedEnv The environment to share.
+     */
+    public ReplSession(Environment sharedEnv) {
+        this(sharedEnv, new ArrayList<>());
+    }
+
+    /**
+     * Constructs a new REPL session with a shared environment and pre-existing definitions.
+     * @param sharedEnv The environment to share.
+     * @param initialForms The list of definition forms from a previous session.
+     */
+    public ReplSession(Environment sharedEnv, List<Expr> initialForms) {
+        this.jit = new LispJitCompiler(sharedEnv);
+        this.topLevelForms = new ArrayList<>(initialForms);
+    }
+
+    /**
+     * Returns the environment being used by this REPL session.
+     *
+     * @return The underlying Lisp environment.
+     */
+    public Environment getEnvironment() {
+        return jit.getEnvironment();
+    }
+
+    /**
+     * Returns the list of top-level definition forms accumulated in this session.
+     * @return The list of definition expressions.
+     */
+    public List<Expr> getTopLevelForms() {
+        return this.topLevelForms;
+    }
+
+    /**
+     * Evaluates one or more Lisp expressions from a source string and returns the
+     * value of the last expression. Definitions are added to the shared environment.
+     *
+     * @param source A string containing Lisp code.
+     * @return The result of the evaluation.
+     * @throws Exception if parsing or evaluation fails.
+     */
+    public Object eval(String source) throws Exception {
+        Parser p = new Parser(source);
+        List<Expr> currentForms = p.parseMultiple();
+        if (currentForms.isEmpty()) {
+            return null;
+        }
+
+        List<Expr> formsToCompile = new ArrayList<>(this.topLevelForms);
+        formsToCompile.addAll(currentForms);
+    
+        LispCallable script = jit.compile(formsToCompile);
+        Object result = script.apply(new Object[0]);
+
+        for (Expr form : currentForms) {
+            if (Helpers.isSpecialForm(form, "def") || Helpers.isSpecialForm(form, "defvar")) {
+                this.topLevelForms.add(form);
+            }
+        }
+    
+        return result;
+    }
+
+    /**
+     * Reads from the input stream until a complete Lisp form (balanced parentheses)
+     * has been entered.
+     */
+    private static String readCompleteForm(BufferedReader in) throws Exception {
+        StringBuilder src = new StringBuilder();
+        int parens = 0;
+    
+        while (true) {
+            String line = in.readLine();
+            if (line == null) return null;
+    
+            src.append(line).append('\n');
+    
+            for (char c : line.toCharArray()) {
+                if (c == '(') parens++;
+                else if (c == ')') parens--;
+            }
+            if (src.length() > 0 && parens <= 0) break;
+            
+            System.out.print(".... ");
+        }
+        return src.toString();
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Command-line REPL for both standalone and embedded use             */
+    /* ------------------------------------------------------------------ */
+    /**
+     * Standard main entry point for running the REPL as a standalone application.
+     */
+    public static void main(String[] args) throws Exception {
+        main(new Environment());
+    }
+    
+    /**
+     * Starts a REPL main-loop using a provided environment but no prior definitions.
+     */
+    public static void main(Environment sharedEnv) throws Exception {
+        main(sharedEnv, new ArrayList<>());
+    }
+
+    /**
+     * A main-loop that runs the REPL using a provided, shared environment and
+     * a list of initial definitions. This is the correct method to call when
+     * starting a REPL from an already-running interpreter.
+     */
+    public static void main(Environment sharedEnv, List<Expr> initialForms) throws Exception {
+        BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
+        // Create a REPL session that knows about the previous definitions.
+        ReplSession repl = new ReplSession(sharedEnv, initialForms);
+
+        System.out.println("LispJ REPL. Type :quit or press Ctrl-D to exit.");
+
+        for (;;) {
+            System.out.print("lisp> ");
+            String formSrc = readCompleteForm(in);
+            
+            if (formSrc == null || formSrc.trim().equals(":quit")) {
+                break;
+            }
+            if (formSrc.trim().isEmpty()) {
+                continue;
+            }
+        
+            try {
+                Object v = repl.eval(formSrc);
+                if (v != null) {
+                   System.out.println("⇒ " + v);
+                }
+            } catch (ParseException e) {
+                System.err.println("Parse error: " + e.getMessage());
+            } catch (Throwable t) {
+                t.printStackTrace(System.err);
+            }
+        }
+    }
+}
+
+// ========================================================================
+// io/github/jayhost/SpecialFormCompiler.java
+//
+// Handles compilation of special forms like `if`, `let`, and `lambda`.
+// ========================================================================
+package io.github.jayhost;
+
+import org.objectweb.asm.Label;
+import org.objectweb.asm.MethodVisitor;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+
+import static org.objectweb.asm.Opcodes.*;
+
+public class SpecialFormCompiler {
+    private final ExpressionCompiler parent;
+    private final CompilationContext ctx;
+
+    public SpecialFormCompiler(ExpressionCompiler parent, CompilationContext ctx) {
+        this.parent = parent;
+        this.ctx = ctx;
+    }
+
+    public boolean compileSpecialForm(String op, ListExpr list, MethodVisitor mv) {
+        switch (op) {
+            case "if": compileIf(list, mv); return true;
+            case "let": compileLet(list, mv); return true;
+            case "lambda": compileLambda(list, mv); return true;
+            case "java-call":compileJavaCall(list, mv); return true; 
+        }
+        return false;
+    }
+
+    private void compileIf(ListExpr ifExpr, MethodVisitor mv) {
+        Label elseLbl = new Label();
+        Label endLbl = new Label();
+        parent.compileExpression(ifExpr.elements.get(1), mv); // cond
+        mv.visitMethodInsn(INVOKESTATIC, parent.getRootClassName(), "isTruthy", "(Ljava/lang/Object;)Z", false);
+        mv.visitJumpInsn(IFEQ, elseLbl);
+        parent.compileExpression(ifExpr.elements.get(2), mv); // then
+        mv.visitJumpInsn(GOTO, endLbl);
+        mv.visitLabel(elseLbl);
+        if (ifExpr.elements.size() > 3) parent.compileExpression(ifExpr.elements.get(3), mv); // else
+        else mv.visitInsn(ACONST_NULL);
+        mv.visitLabel(endLbl);
+    }
+
+    private void compileLet(ListExpr letExpr, MethodVisitor mv) {
+        Map<String, Integer> originalLocals = new HashMap<>(ctx.localVars);
+        int originalNextVarIndex = ctx.nextVarIndex;
+
+        ListExpr bindings = (ListExpr) letExpr.elements.get(1);
+        for (int i = 0; i < bindings.elements.size(); i += 2) {
+            parent.compileExpression(bindings.elements.get(i + 1), mv);
+            mv.visitVarInsn(ASTORE, ctx.nextVarIndex);
+            ctx.localVars.put(((SymbolExpr) bindings.elements.get(i)).name, ctx.nextVarIndex++);
+        }
+        for (int i = 2; i < letExpr.elements.size(); i++) {
+            parent.compileExpression(letExpr.elements.get(i), mv);
+            if (i < letExpr.elements.size() - 1) mv.visitInsn(POP);
+        }
+        ctx.localVars.clear();
+        ctx.localVars.putAll(originalLocals);
+        ctx.nextVarIndex = originalNextVarIndex;
+    }
+
+    private void compileLambda(ListExpr lambdaExpr, MethodVisitor mv) {
+        LambdaCompiler lambdaCompiler = new LambdaCompiler(parent.compiler);
+        // Pass an empty map for the parent scope. This forces the lambda to correctly
+        // analyze its own captures relative to its own parameters.
+        byte[] bytecode = lambdaCompiler.compileFunction(lambdaExpr, ctx.className, Collections.emptyMap());
+
+        String lambdaClassName = Helpers.getClassNameFromBytecode(bytecode);
+        parent.compiler.defineClass(lambdaClassName.replace('/', '.'), bytecode); // <-- FIXED
+        
+        mv.visitTypeInsn(NEW, lambdaClassName);
+        mv.visitInsn(DUP);
+        
+        // Analyze captures at the call site to push constructor arguments
+        Set<String> lambdaScope = new HashSet<>();
+        ((ListExpr)lambdaExpr.elements.get(1)).elements.forEach(p -> lambdaScope.add(((SymbolExpr)p).name));
+        Set<String> captured = CaptureAnalyzer.findCapturedVars(lambdaExpr.elements.get(2), lambdaScope, parent.compiler);
+
+        StringBuilder ctorDesc = new StringBuilder("(");
+        for (String var : captured) {
+            ctorDesc.append("Ljava/lang/Object;");
+            // Compile the expression for the captured variable from the parent's context.
+            parent.compileExpression(new SymbolExpr(var, -1), mv);
+        }
+        ctorDesc.append(")V");
+
+        mv.visitMethodInsn(INVOKESPECIAL, lambdaClassName, "<init>", ctorDesc.toString(), false);
+    }
+
+    private void compileJavaCall(ListExpr call, MethodVisitor mv) {
+        try {
+            /* ---------- parse form ---------- */
+            Expr   targetExpr = call.elements.get(1);     // class literal or instance expr
+            String member1    = ((StringExpr) call.elements.get(2)).value;
+    
+            int    idx        = 3;                         // cursor in elements list
+    
+            /* ================================================================
+               CASE A – target is a *class literal* ->  static method or field
+               ================================================================= */
+            if (targetExpr instanceof StringExpr classLit) {
+                String className = classLit.value;
+                Class<?> clazz   = Class.forName(className);
+    
+                int argCount = call.elements.size() - idx; // remaining args
+    
+                /* ---------- 1. try static METHOD first ---------- */
+                Method m = tryFindMethod(clazz, member1, argCount, /*static*/true);
+                if (m != null) {
+                    // compile arg expressions 1-by-1
+                    for (int i = idx; i < call.elements.size(); i++)
+                        parent.compileExpression(call.elements.get(i), mv);
+    
+                    mv.visitMethodInsn(INVOKESTATIC,
+                                       className.replace('.', '/'),
+                                       member1,
+                                       org.objectweb.asm.Type.getMethodDescriptor(m),
+                                       false);
+                    boxAndPadReturn(mv, m.getReturnType());
+                    return;
+                }
+    
+                /* ---------- 2. else treat member1 as static FIELD ---------- */
+                Field f = clazz.getField(member1); // throws if not found
+    
+                // GETSTATIC <class>.<field>
+                mv.visitFieldInsn(GETSTATIC,
+                                  className.replace('.', '/'),
+                                  member1,
+                                  org.objectweb.asm.Type.getDescriptor(f.getType()));
+    
+                /* (java-call "java.lang.System" "out")  → just returns PrintStream */
+                if (idx == call.elements.size()) {
+                    boxAndPadReturn(mv, f.getType());
+                    return;
+                }
+    
+                /* But if more tokens follow, member2 must be an instance method */
+                Expr m2Expr = call.elements.get(idx++);
+                if (!(m2Expr instanceof StringExpr))
+                    throw new RuntimeException("Expected instance-method name after field '" +
+                                               member1 + '\'');
+    
+                String   instMethod = ((StringExpr) m2Expr).value;
+                Class<?> instType   = f.getType();
+                int instArgCount    = call.elements.size() - idx;
+    
+                Method instM = tryFindMethod(instType, instMethod, instArgCount, /*static*/false);
+                if (instM == null)
+                    throw new NoSuchMethodException("Method " + instMethod + " on " +
+                                                    instType.getName() + " with " +
+                                                    instArgCount + " args");
+    
+                // compile instance-method args
+                for (int i = idx; i < call.elements.size(); i++)
+                    parent.compileExpression(call.elements.get(i), mv);
+    
+                mv.visitMethodInsn(INVOKEVIRTUAL,
+                                   org.objectweb.asm.Type.getInternalName(instType),
+                                   instMethod,
+                                   org.objectweb.asm.Type.getMethodDescriptor(instM),
+                                   false);
+                boxAndPadReturn(mv, instM.getReturnType());
+                return;
+            }
+    
+            /* ================================================================
+               CASE B – target is an *expression instance*
+               ================================================================= */
+            // not yet supported – feel free to improve
+            throw new UnsupportedOperationException(
+                    "General instance java-call not yet implemented.");
+    
+        } catch (Throwable ex) {
+            throw new RuntimeException("Error compiling java-call: " +
+                                       ex.getMessage(), ex);
+        }
+    }
+    
+    /* ------------------------------------------------------------------ */
+    /* helpers                                                            */
+    /* ------------------------------------------------------------------ */
+    private Method tryFindMethod(Class<?> cls, String name,
+                                 int paramCount, boolean wantStatic) {
+        for (Method m : cls.getMethods()) {
+            if (java.lang.reflect.Modifier.isStatic(m.getModifiers()) != wantStatic) continue;
+            if (!m.getName().equals(name)) continue;
+            if (m.getParameterCount() != paramCount) continue;
+            return m;
+        }
+        return null;
+    }
+    
+    private void boxAndPadReturn(MethodVisitor mv, Class<?> ret) {
+        if (ret == Void.TYPE) {
+            mv.visitInsn(ACONST_NULL);           // pad to produce an Object
+        } else if (ret.isPrimitive()) {          // box primitives
+            String wrapper, desc;
+            if (ret == int.class)    { wrapper = "java/lang/Integer"; desc = "(I)Ljava/lang/Integer;";}
+            else if (ret == long.class){ wrapper = "java/lang/Long";   desc = "(J)Ljava/lang/Long;";}
+            else if (ret == float.class){wrapper = "java/lang/Float";  desc = "(F)Ljava/lang/Float;";}
+            else if (ret == double.class){wrapper="java/lang/Double";  desc = "(D)Ljava/lang/Double;";}
+            else if (ret == boolean.class){wrapper="java/lang/Boolean";desc = "(Z)Ljava/lang/Boolean;";}
+            else if (ret == char.class){wrapper="java/lang/Character";desc="(C)Ljava/lang/Character;";}
+            else if (ret == byte.class){wrapper="java/lang/Byte";    desc="(B)Ljava/lang/Byte;";}
+            else                     {wrapper="java/lang/Short";   desc="(S)Ljava/lang/Short;";}
+            mv.visitMethodInsn(INVOKESTATIC, wrapper, "valueOf", desc, false);
+        }
+    }
+}
+
+package io.github.jayhost;
+
+public class Token {
+    public enum Type {
+        PLUS, MINUS, STAR, SLASH,
+        GREATER, GREATER_EQUAL,
+        LESS, LESS_EQUAL
+    }
+
+    public final Type type;
+    public final String lexeme;
+    public final int line;
+
+    public Token(Type type, String lexeme, int line) {
+        this.type = type;
+        this.lexeme = lexeme;
+        this.line = line;
+    }
+}
+
+// ========================================================================
+// io/github/jayhost/TopLevelCompiler.java
+//
+// Handles the compilation of top-level `def` and `defvar` forms.
+// ========================================================================
+package io.github.jayhost;
+
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
+import java.util.Collections;
+import java.util.List;
+import static org.objectweb.asm.Opcodes.*;
+
+public class TopLevelCompiler {
+    private final LispJitCompiler compiler;
+    private final ClassWriter cw;
+    private final String mainClassName;
+    private MethodVisitor staticInitializerMv;
+
+    public TopLevelCompiler(LispJitCompiler compiler, ClassWriter cw, String mainClassName) {
+        this.compiler = compiler;
+        this.cw = cw;
+        this.mainClassName = mainClassName;
+    }
+
+    public Expr compileTopLevelForms(List<Expr> forms) {
+        Expr lastExpr = null;
+        for (Expr form : forms) {
+            if (Helpers.isSpecialForm(form, "def")) {
+                compileTopLevelDef((ListExpr) form);
+            } else if (Helpers.isSpecialForm(form, "defvar")) {
+                compileTopLevelVar((ListExpr) form);
+            } else if (form != null) {
+                lastExpr = form;
+            }
+        }
+        if (staticInitializerMv != null) {
+            staticInitializerMv.visitInsn(RETURN);
+            staticInitializerMv.visitMaxs(0, 0);
+            staticInitializerMv.visitEnd();
+        }
+        return lastExpr;
+    }
+
+    private void ensureClinit() {
+        if (staticInitializerMv == null) {
+            staticInitializerMv = cw.visitMethod(ACC_STATIC, "<clinit>", "()V", null, null);
+            staticInitializerMv.visitCode();
+        }
+    }
+
+    private void compileTopLevelVar(ListExpr varList) {
+        String varName = ((SymbolExpr) varList.elements.get(1)).name;
+        cw.visitField(ACC_PUBLIC | ACC_STATIC, varName, "Ljava/lang/Object;", null, null).visitEnd();
+        ensureClinit();
+        
+        ExpressionCompiler exprCompiler =
+        new ExpressionCompiler(compiler,
+        new CompilationContext(mainClassName, null, Collections.emptyMap(), Collections.emptySet()));
+        exprCompiler.compileExpression(varList.elements.get(2), staticInitializerMv);
+        
+        staticInitializerMv.visitFieldInsn(PUTSTATIC, mainClassName, varName, "Ljava/lang/Object;");
+    }
+
+    private void compileTopLevelDef(ListExpr defList) {
+        String funcName = ((SymbolExpr) ((ListExpr) defList.elements.get(1)).elements.get(0)).name;
+        LambdaCompiler lambdaCompiler = new LambdaCompiler(compiler);
+        byte[] funcBytecode = lambdaCompiler.compileFunction(defList, mainClassName, Collections.emptyMap());
+        
+        String funcClassName = Helpers.getClassNameFromBytecode(funcBytecode);
+        compiler.defineClass(funcClassName.replace('/', '.'), funcBytecode); // <-- FIXED
+        
+        ensureClinit();
+        cw.visitField(ACC_PUBLIC | ACC_STATIC, funcName, "Lio/github/jayhost/LispCallable;", null, null).visitEnd();
+        staticInitializerMv.visitTypeInsn(NEW, funcClassName);
+        staticInitializerMv.visitInsn(DUP);
+        staticInitializerMv.visitMethodInsn(INVOKESPECIAL, funcClassName, "<init>", "()V", false);
+        staticInitializerMv.visitFieldInsn(PUTSTATIC, mainClassName, funcName, "Lio/github/jayhost/LispCallable;");
+    }
+}
+
+package io.github.jayhost;
+
+import com.badlogic.gdx.ApplicationAdapter;
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.assets.loaders.resolvers.InternalFileHandleResolver;
+import com.badlogic.gdx.graphics.GL20;
+import com.badlogic.gdx.graphics.Cubemap;
+import com.badlogic.gdx.graphics.Texture;
+import com.badlogic.gdx.graphics.PerspectiveCamera;
+import com.badlogic.gdx.math.MathUtils;
+import java.util.HashMap;
+import java.util.List;
+
+import net.mgsx.gltf.loaders.gltf.GLTFLoader;
+import net.mgsx.gltf.scene3d.attributes.PBRCubemapAttribute;
+import net.mgsx.gltf.scene3d.attributes.PBRTextureAttribute;
+import net.mgsx.gltf.scene3d.scene.Scene;
+import net.mgsx.gltf.scene3d.scene.SceneAsset;
+import net.mgsx.gltf.scene3d.scene.SceneManager;
+import net.mgsx.gltf.scene3d.scene.SceneSkybox;
+import net.mgsx.gltf.scene3d.utils.EnvironmentUtil;
+
+
+public class Main extends ApplicationAdapter {
+    private SceneManager sceneManager;
+    private PerspectiveCamera camera;
+    private ReplSession interpreter;
+    private float time;
+    FPSController fps;
+
+    // Track dynamically loaded scenes by path
+    private HashMap<String, Scene> loadedScenes = new HashMap<>();
+
+    @Override
+    public void create() {
+        // GL context setup
+        Gdx.gl.glEnable(GL20.GL_DEPTH_TEST);
+        Gdx.gl.glDepthFunc(GL20.GL_LEQUAL);
+
+        // Load the base model
+        SceneAsset baseAsset = new GLTFLoader()
+            .load(Gdx.files.internal("models/helm/DamagedHelmet.gltf"));
+        Scene baseScene = new Scene(baseAsset.scene);
+
+        // Scene manager & camera
+        sceneManager = new SceneManager();
+//        sceneManager.addScene(baseScene);
+
+        camera = new PerspectiveCamera(
+            90f, Gdx.graphics.getWidth(), Gdx.graphics.getHeight()
+        );
+        camera.near = 0.1f;
+        camera.far  = 100f;
+//        camera.position.set(2f, 2f, 2f);
+        camera.lookAt(0f, 0f, 0f);
+        camera.update();
+        sceneManager.setCamera(camera);
+
+        fps = new FPSController(camera);
+        Gdx.input.setInputProcessor(fps);
+        // PBR environment
+        Cubemap diffuse = EnvironmentUtil.createCubemap(
+            new InternalFileHandleResolver(),
+            "mytex/diffuse/diffuse_", ".png",
+            EnvironmentUtil.FACE_NAMES_NEG_POS
+        );
+        Cubemap specular = EnvironmentUtil.createCubemap(
+            new InternalFileHandleResolver(),
+            "mytex/specular/specular_", "_", ".png",
+            10, EnvironmentUtil.FACE_NAMES_NEG_POS
+        );
+        Texture brdfLUT = new Texture(
+            Gdx.files.internal("textures/brdfLUT.png")
+        );
+        sceneManager.setAmbientLight(1f);
+        sceneManager.environment.set(
+            new PBRTextureAttribute(
+                PBRTextureAttribute.BRDFLUTTexture, brdfLUT
+            )
+        );
+        sceneManager.environment.set(
+            PBRCubemapAttribute.createSpecularEnv(specular)
+        );
+        sceneManager.environment.set(
+            PBRCubemapAttribute.createDiffuseEnv(diffuse)
+        );
+        sceneManager.setSkyBox(new SceneSkybox(diffuse));
+
+        // --- Lisp interpreter setup ---
+        
+        ReplSession repl = new ReplSession(new Environment());
+        this.interpreter = repl;
+
+try {
+    interpreter.eval("(def (add-at path x y z) (java-call \"io.github.jayhost.LispBridge\" \"addEntityAt\" path x y z))");
+            interpreter.eval("(def (add path) (add-at path 0 0 0))");
+            interpreter.eval("(def (rem path) (java-call \"io.github.jayhost.LispBridge\" \"removeEntity\" path))");
+            interpreter.eval("(def (drain-spawns) (java-call \"io.github.jayhost.LispBridge\" \"drainSpawns\"))");
+            interpreter.eval("(def (drain-removals) (java-call \"io.github.jayhost.LispBridge\" \"drainRemovals\"))");
+
+            interpreter.eval("(defvar helm \"models/helm/DamagedHelmet.gltf\")");
+            interpreter.eval("(defvar mug \"models/mug/mug.gltf\")");
+            interpreter.eval("(defvar ball \"models/ball/ball.gltf\")");
+            interpreter.eval("(defvar barrel \"models/barrel/Barrel.gltf\")");
+            interpreter.eval("(defvar mosin \"models/mosin/M91.gltf\")");
+            interpreter.eval("(defvar bird \"models/god/bird.gltf\")");
+            interpreter.eval("(defvar sponza \"models/sponza/Sponza.gltf\")");
+        
+            interpreter.eval("(def (add-many n model-path) (if (> n 0) (let () (add-at model-path n 0.0 0.0) (add-many (- n 1.0) model-path))))");
+
+            // Call the function to add 100 barrels
+            // interpreter.eval("(add-many 100.0 helm)");
+            // interpreter.eval("(add sponza)");
+            // System.out.println(interpreter.eval("helm"));
+} catch (Exception e) {
+    e.printStackTrace();
+}
+
+new Thread(() -> {
+    try {
+        ReplSession.main(this.interpreter.getEnvironment(), this.interpreter.getTopLevelForms());
+
+    } catch (Exception e) {
+        e.printStackTrace();
+    }
+}, "Lisp-REPL").start();
+}
+ 
+
+    @Override
+    public void render() {
+        float dt = Gdx.graphics.getDeltaTime();
+        time += dt;
+
+        // Pull back any new paths from Lisp
+
+        Object spawnRaw = null;
+        Object removeRaw = null;
+        try {
+            spawnRaw = interpreter.eval("(drain-spawns)");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        if (spawnRaw instanceof java.util.List) {
+            for (Object o : (java.util.List<?>)spawnRaw) {
+                SpawnRequest req = (SpawnRequest)o;
+                if (!loadedScenes.containsKey(req.path)) {
+                    SceneAsset a = new GLTFLoader()
+                        .load(Gdx.files.internal(req.path));
+                    Scene s = new Scene(a.scene);
+                    // position the modelInstance
+                    s.modelInstance.transform.setToTranslation(req.position);
+                    sceneManager.addScene(s);
+                    loadedScenes.put(req.path, s);
+                }
+            }
+        }
+
+        // Handle removals
+        try {
+            removeRaw = interpreter.eval("(drain-removals)");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        if (removeRaw instanceof java.util.List) {
+            for (Object o : (java.util.List<?>)removeRaw) {
+                String path = (String)o;
+                Scene s = loadedScenes.remove(path);
+                if (s != null) {
+                    sceneManager.removeScene(s);
+                }
+            }
+        }
+
+
+//        // Orbit camera
+//        camera.position.setFromSpherical(
+//            MathUtils.PI/4f, time * 0.5f
+//        ).scl(2f);
+        float radius = 2f;
+        float angle = time * 0.5f;
+        float x = MathUtils.cos(angle) * radius;
+        float z = MathUtils.sin(angle) * radius;
+        camera.position.set(x, 1f, z);  // constant Y height
+        camera.lookAt(0f, 1f, 0f);
+        camera.update();
+
+
+// update FPS controller (moves camera)
+//        fps.update(dt);
+
+        // Render
+        Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT | GL20.GL_DEPTH_BUFFER_BIT);
+        sceneManager.update(dt);
+        sceneManager.render();
+
+        // Debug
+//        Gdx.app.log("Main", "Loaded scenes: " + loadedScenes.size());
+    }
+
+    @Override
+    public void dispose() {
+        sceneManager.dispose();
+    }
+
+
+}
+// ========================================================================
+// io/github/jayhost/Environment.java
+//
+// Holds the shared state for a Lisp interpreter session, including
+// defined functions and global variables.
+// ========================================================================
+package io.github.jayhost;
+
+import org.objectweb.asm.Type;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * Represents the execution environment for the Lisp interpreter.
+ * <p>
+ * This class holds the symbol tables for global variables and functions,
+ * allowing state to be preserved across multiple calls to the JIT compiler
+ * and shared between different components (e.g., a game and a REPL).
+ */
+public class Environment {
+
+    /** Stores signatures of all globally defined functions. */
+    final Map<String, FunctionSignature> functionTable = new HashMap<>();
+
+    /** Stores types of all globally defined variables. */
+    final Map<String, Type> globalVarTable = new HashMap<>();
+
+    /**
+     * Constructs a new, empty environment.
+     */
+    public Environment() {
+        // The maps are initialized and ready for use.
+    }
+}
+

@@ -1,0 +1,119 @@
+package io.github.jayhost;
+
+import com.badlogic.gdx.ApplicationAdapter;
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.graphics.GL20;
+import com.badlogic.gdx.graphics.GL30;
+import com.badlogic.gdx.graphics.PerspectiveCamera;
+import com.badlogic.gdx.graphics.OrthographicCamera;
+import com.badlogic.gdx.graphics.g2d.SpriteBatch;
+import com.badlogic.gdx.graphics.glutils.FrameBuffer;
+import com.badlogic.gdx.graphics.glutils.GLFrameBuffer.FrameBufferBuilder;
+import com.badlogic.gdx.graphics.g3d.Environment;
+import com.badlogic.gdx.graphics.g3d.Model;
+import com.badlogic.gdx.graphics.g3d.ModelBatch;
+import com.badlogic.gdx.graphics.g3d.ModelInstance;
+import com.badlogic.gdx.graphics.g3d.attributes.ColorAttribute;
+import com.badlogic.gdx.graphics.g3d.environment.DirectionalLight;
+import com.badlogic.gdx.utils.ScreenUtils;
+import net.mgsx.gltf.scene3d.scene.SceneAsset;
+import net.mgsx.gltf.loaders.glb.GLBLoader;
+
+public class Main extends ApplicationAdapter {
+    private FrameBuffer fbo, fboMS;
+    private SpriteBatch spriteBatch;
+    private ModelBatch modelBatch;
+    private PerspectiveCamera cam3D;
+    private OrthographicCamera cam2D;
+    private Environment env;
+    private Model model;
+    private ModelInstance instance;
+
+    @Override
+    public void create() {
+        // —–– 1) setup MRT + MSAA FBOs
+        fboMS = new FrameBufferBuilder(64, 64, 4)
+            .addColorRenderBuffer(GL30.GL_RGBA8)
+            .addColorRenderBuffer(GL30.GL_RGBA8)
+            .addDepthRenderBuffer(GL30.GL_DEPTH_COMPONENT24)
+            .build();
+
+        fbo = new FrameBufferBuilder(64, 64)
+            .addColorTextureAttachment(GL30.GL_RGBA8, GL20.GL_RGBA, GL30.GL_UNSIGNED_BYTE)
+            .addColorTextureAttachment(GL30.GL_RGBA8, GL20.GL_RGBA, GL20.GL_UNSIGNED_BYTE)
+            .addDepthTextureAttachment(GL30.GL_DEPTH_COMPONENT24, GL30.GL_UNSIGNED_INT)
+            .build();
+
+        // —–– 2) 3D setup
+        modelBatch  = new ModelBatch();
+        spriteBatch = new SpriteBatch();
+
+        cam3D = new PerspectiveCamera(67, 1f, 1f);
+        cam3D.position.set(3f,3f,3f);
+        cam3D.lookAt(0f,0f,0f);
+        cam3D.near = 1f; cam3D.far = 100f;
+        cam3D.update();
+
+        env = new Environment();
+        env.set(new ColorAttribute(ColorAttribute.AmbientLight, 0.4f,0.4f,0.4f,1f));
+        env.add(new DirectionalLight().set(1f,1f,1f, -1f,-0.8f,-0.2f));
+
+        // load your cube.glb
+        SceneAsset scene = new GLBLoader().load(Gdx.files.internal("cube.glb"));
+//        Gdx.app.log("GLB", "model = " + scene.scene.model + ", nodes = " + scene.sc.getNodes().size);
+        model = scene.scene.model;
+        instance = new ModelInstance(model);
+
+        // —–– 3) 2D camera for blitting
+        cam2D = new OrthographicCamera(2f, 3f);
+        cam2D.position.set(1f,1.5f,0f);
+        cam2D.update();
+    }
+
+    @Override
+    public void render() {
+        Gdx.gl.glEnable(GL20.GL_DEPTH_TEST);
+
+        // --- pass 1: render into plain MRT
+        fbo.begin();
+        ScreenUtils.clear(0,0,0,1, true);
+        modelBatch.begin(cam3D);
+        modelBatch.render(instance, env);
+        modelBatch.end();
+        fbo.end();
+
+        // --- draw those two attachments at x=0
+        spriteBatch.setProjectionMatrix(cam2D.combined);
+        spriteBatch.begin();
+        spriteBatch.draw(fbo.getTextureAttachments().get(0), 0, 0, 1, 1);
+        spriteBatch.draw(fbo.getTextureAttachments().get(1), 0, 1, 1, 1);
+        spriteBatch.end();
+
+        // --- pass 2: render into MSAA, resolve into MRT
+        fboMS.begin();
+        ScreenUtils.clear(0,0,0,1, true);
+        modelBatch.begin(cam3D);
+        modelBatch.render(instance, env);
+        modelBatch.end();
+        fboMS.end();
+
+        fboMS.transfer(fbo);
+
+        // --- draw resolved MRT at x=1
+        spriteBatch.begin();
+//        spriteBatch.draw(fbo.getTextureAttachments().get(0), 1, 0, 1, 1);
+//        spriteBatch.draw(fbo.getTextureAttachments().get(1), 1, 1, 1, 1);
+        spriteBatch.end();
+
+        Gdx.gl.glDisable(GL20.GL_DEPTH_TEST);
+    }
+
+    @Override
+    public void dispose() {
+        fboMS.dispose();
+        fbo.dispose();
+        modelBatch.dispose();
+        spriteBatch.dispose();
+        model.dispose();
+    }
+}
